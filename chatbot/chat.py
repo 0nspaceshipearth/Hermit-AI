@@ -239,7 +239,18 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                 
                 # Append verified facts found by Joint 4
                 facts_list = results[0].get('search_context', {}).get('facts', []) if results else []
-                if facts_list:
+                
+                # SOFT BLOCK: Check for premise verification failure (SYSTEM ALERT)
+                # If Joint 4 determined the sources are irrelevant, add disclaimer but still let model answer
+                if facts_list and any("[SYSTEM ALERT" in str(fact) for fact in facts_list):
+                    debug_print("SOFT BLOCK: Premise verification failed - adding disclaimer")
+                    context_text += "\n\n⚠️ IMPORTANT DISCLAIMER ⚠️\n"
+                    context_text += "The retrieved sources do NOT contain relevant information for this query.\n"
+                    context_text += "You may answer using your general knowledge, but clearly state at the START:\n"
+                    context_text += "'Note: I could not find sources for this in my knowledge base. The following is based on general knowledge and may contain inaccuracies.'\n"
+                    context_text += "Then provide your best answer from training data.\n"
+                
+                if facts_list and not any("[SYSTEM ALERT" in str(fact) for fact in facts_list):
                     debug_print(f"Adding {len(facts_list)} verified facts to context")
                     context_text += "\n\n=== VERIFIED FACTUAL DETAILS (Extracted from Source) ===\n"
                     context_text += "The following details were explicitly found in the source text for your query:\n"
