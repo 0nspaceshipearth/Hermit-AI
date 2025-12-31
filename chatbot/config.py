@@ -30,5 +30,8 @@ JOINT_TIMEOUT = 10
 # Adaptive RAG Configuration
 ADAPTIVE_THRESHOLD = 4.0  # If max score is below this, trigger expansion
 
+# Global Context Window Configuration
+DEFAULT_CONTEXT_SIZE = 16384
+
 
 

@@ -47,7 +47,6 @@ def extract_json_from_text(text: str) -> Any:
 
     # 2. Heuristic scan for looking for first '{' or '['
     # We use a simple counter to find the matching closing brace/bracket
-    # This avoids issues where regex gets confused by nested braces
     
     start_indices = [m.start() for m in re.finditer(r'[\[\{]', text)]
     
@@ -58,9 +57,6 @@ def extract_json_from_text(text: str) -> Any:
         stack = 1
         for i in range(start_idx + 1, len(text)):
             char = text[i]
-            # Simple stack logic; ignores string scraping for brevity but usually sufficient for LLM outputs
-            # For a perfect parser we'd need to track string state to ignore braces inside strings, 
-            # but standard json.loads will catch invalid syntax anyway.
             if char == opener:
                 stack += 1
             elif char == closer:
@@ -69,10 +65,18 @@ def extract_json_from_text(text: str) -> Any:
             if stack == 0:
                 potential_json = text[start_idx : i + 1]
                 try:
-                    return json.loads(potential_json)
+                    # Soft Fix: Try to clean trailing commas which are common in LLM output
+                    # Simple regex replace: , ] -> ] and , } -> }
+                    # This is risky but effective for simple lists
+                    clean_json = re.sub(r',\s*([\]\}])', r'\1', potential_json)
+                    return json.loads(clean_json)
                 except json.JSONDecodeError:
-                    break # Try next starting point
-                    
+                    # Try original
+                    try:
+                        return json.loads(potential_json)
+                    except json.JSONDecodeError:
+                        break # Try next starting point
+                        
     raise ValueError("No valid JSON found in response")
 
 
@@ -81,8 +85,17 @@ def local_inference(model: str, prompt: str, temperature: float = 0.0, timeout: 
     Run local inference using ModelManager.
     """
     try:
-        # Reduced context to prevent OOM
-        llm = ModelManager.get_model(model, n_ctx=4096)  # Shared instance
+        # Use configured context size (default 16384)
+        n_ctx = getattr(config, 'DEFAULT_CONTEXT_SIZE', 16384)
+        
+        # Truncate prompt if it exceeds context limit (leaving room for response)
+        # 1 token approx 4 chars. Safety buffer: 1000 tokens for generation/system overhead.
+        max_prompt_chars = (n_ctx - 1000) * 3  # Conservative estimate
+        if len(prompt) > max_prompt_chars:
+            debug_print("INFERENCE", f"Truncating prompt from {len(prompt)} to {max_prompt_chars} chars")
+            prompt = prompt[:max_prompt_chars] + "...(truncated)"
+
+        llm = ModelManager.get_model(model, n_ctx=n_ctx)  # Shared instance
         
         # Use chat completion for instruction-tuned models
         response = llm.create_chat_completion(
@@ -94,6 +107,19 @@ def local_inference(model: str, prompt: str, temperature: float = 0.0, timeout: 
         return response['choices'][0]['message']['content']
     except Exception as e:
         debug_print("INFERENCE", f"Model {model} failed: {e}")
+        # Soft fallback: Try one more time with shorter context if it was a context error
+        if "context window" in str(e) or "exceed" in str(e):
+             debug_print("INFERENCE", "Retrying with aggressive truncation...")
+             try:
+                 prompt = prompt[:4000] + "...(truncated)"
+                 llm = ModelManager.get_model(model, n_ctx=n_ctx)
+                 response = llm.create_chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=512
+                 )
+                 return response['choices'][0]['message']['content']
+             except Exception as retry_e:
+                 raise RuntimeError(f"Local inference failed (retry failed): {retry_e}")
         raise RuntimeError(f"Local inference failed: {e}")
 
 
@@ -316,6 +342,13 @@ class ArticleScorerJoint:
         
         for title in article_titles:
             title_lower = title.lower().strip()
+            
+            # Fix: Disambiguation Trap
+            # Do not auto-select disambiguation pages even if they match entity name exactly
+            if "(disambiguation)" in title_lower:
+                debug_print("JOINT2:SCORER", f"EXACT MATCH SKIPPED: '{title}' (Disambiguation page)")
+                continue
+
             for entity_name in all_entity_names:
                 if title_lower == entity_name.lower().strip():
                     debug_print("JOINT2:SCORER", f"EXACT MATCH OVERRIDE: '{title}' == entity '{entity_name}' -> score 11.0")
@@ -361,8 +394,17 @@ class ArticleScorerJoint:
             # Use robust extractor
             scores = extract_json_from_text(response)
             
+            if isinstance(scores, dict):
+                # Handle wrapped format like {"items": [...]} or {"scores": [...]}
+                # Common wrapper keys: items, scores, results, articles
+                for key in ["items", "scores", "results", "articles"]:
+                    if key in scores and isinstance(scores[key], list):
+                         debug_print("JOINT2:SCORER", f"Unwrapped list from key '{key}'")
+                         scores = scores[key]
+                         break
+            
             if not isinstance(scores, list):
-                 raise ValueError("Response is not a JSON array")
+                 raise ValueError(f"Response is not a JSON array (got {type(scores).__name__})")
 
             # --- VALIDATION & FILTERING ---
             # Helper: Normalize a title for fuzzy matching
@@ -435,6 +477,9 @@ class ArticleScorerJoint:
             
         except Exception as e:
             debug_print("JOINT2:SCORER", f"Scoring failed: {type(e).__name__}: {e}")
+            if 'response' in locals():
+                debug_print("JOINT2:SCORER", f"FAILED RESPONSE RAW: {response}")
+            
             # Fallback: return all articles with equal scores
             debug_print("JOINT2:SCORER", "Using fallback: equal scores")
             return [(title, 5.0) for title in article_titles[:top_k]]
@@ -453,7 +498,7 @@ class ChunkFilterJoint:
         self.temperature = config.FILTER_JOINT_TEMP
         debug_print("JOINT3:INIT", f"ChunkFilter initialized with {self.model}")
     
-    def filter(self, query: str, chunks: List[Dict], top_k: int = 5, entity_info: Dict = None) -> List[Dict]:
+    def filter(self, query: str, chunks: List[Dict], top_k: int = 5, entity_info: Dict = None, mode: str = "FACTUAL") -> List[Dict]:
         """
         Filter chunks by query relevance.
         
@@ -462,9 +507,7 @@ class ChunkFilterJoint:
             chunks: List of chunk dicts with 'text' and 'metadata' keys
             top_k: Return top K relevant chunks
             entity_info: Optional entity info for comparison-aware filtering
-            
-        Returns:
-            List of chunk dicts, sorted by relevance
+            mode: Operational mode (e.g., "FACTUAL", "CODE")
         """
         if not chunks:
             debug_print("JOINT3:FILTER", "No chunks to filter")
@@ -494,7 +537,35 @@ class ChunkFilterJoint:
         
         chunks_text = "\n\n".join(chunks_formatted)
         
-        prompt = f"""Rate these text chunks for how well they answer this query.
+        # Custom Prompt for CODE mode
+        if mode == "CODE":
+            debug_print("JOINT3:FILTER", "Using CODE-specific prompt")
+            prompt = f"""Rate these text chunks for how well they provide CODE implementation for this query.
+
+Query: {query}
+
+Chunks:
+{chunks_text}
+
+Rate each chunk 0-10 where:
+- 10 = Contains actual code blocks, function signatures, or API usage relevant to request.
+- 7-9 = Technical documentation explaining the class/function.
+- 0 = History/Biography/General text without code.
+
+CRITICAL RULES:
+1. PRIORITIZE SYNTAX: Chunks with `def`, `class`, `{{`, or indentation get priority.
+2. IGNORE HISTORY: If the chunk talks about "history of Python" but has no code, rate it LOW (0-2).
+3. We need RUNNABLE EXAMPLES.
+
+Return ONLY a JSON array:
+[
+  {{"chunk_id": 1, "score": 10}},
+  {{"chunk_id": 2, "score": 3}}
+]
+"""
+        else:
+            # Standard Fact/History Prompt
+            prompt = f"""Rate these text chunks for how well they answer this query.
 
 Query: {query}
 
@@ -518,8 +589,8 @@ Return ONLY a JSON array:
   {{"chunk_id": 1, "score": 10}},
   {{"chunk_id": 2, "score": 3}}
 ]
-
-Rate ALL chunks. No explanation, only JSON."""
+"""
+        prompt += "\nRate ALL chunks. No explanation, only JSON."
 
         try:
             # Use longer timeout for chunk filtering since it processes more text
@@ -790,15 +861,20 @@ Text:
 {context_window}
 
 INSTRUCTIONS:
-1. Identify the core premise (e.g. "Tesla worked for CIA").
-2. Check if the text explicitly supports, explicitly contradicts, or simply doesn't mention it.
-3. Be skeptical. If the text says "FBI seized papers" and the user asks "Did CIA seize papers?", the answer is CONTRADICTED (because it was FBI, not CIA).
+1. Identify the core premise.
+   - If Query is a specific claim (e.g. "Did Tesla work for CIA?"), verify that claim.
+   - If Query is a TOPIC (e.g. "Synthesis of Aspirin", "Photosynthesis"), the premise is "The text contains information about [Topic]".
+2. Check if the text supports it.
+   - For Topic Queries: Return SUPPORTED if the text discusses the topic. Return UNSUPPORTED only if the text is completely unrelated.
+3. BE SKEPTICAL BUT ACCURATE.
+   - Do NOT invent claims not present in the query (e.g. do not assume "using cold water" if user didn't say it).
+   - If the text contradicts a specific user claim, return CONTRADICTED.
 
 Return JSON ONLY:
 {{
-  "premise": "The user assumes X...",
+  "premise": "The user is asking about [Topic]..." or "The user assumes [Claim]...",
   "status": "SUPPORTED" | "CONTRADICTED" | "UNSUPPORTED",
-  "reason": "The text says Y instead of X."
+  "reason": "The text discusses X..." or "The text explicitly refutes X..."
 }}
 """
         

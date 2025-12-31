@@ -147,7 +147,23 @@ class RAGSystem:
         # JIT Cache: {(zim_path, article_path): (chunks, embeddings)}
         self.jit_cache = {}
         
+        # EXPERIMENTAL: Online Mode
+        self.web_retriever = None
+        self.online_mode = False
 
+    def toggle_online_mode(self, enabled: bool):
+        """Enable or disable experimental online mode."""
+        self.online_mode = enabled
+        if enabled and not self.web_retriever:
+            try:
+                from chatbot.web_rag import WebRetriever
+                self.web_retriever = WebRetriever()
+                print("Online mode ENABLED: WebRetriever initialized.")
+            except Exception as e:
+                print(f"Failed to initialize WebRetriever: {e}")
+                self.online_mode = False
+        else:
+             print(f"Online mode set to: {enabled}")
         
     def load_resources(self):
         """Load models and indices if they exist."""
@@ -315,7 +331,7 @@ class RAGSystem:
         # Add to FAISS
         self.faiss_index.add(embeddings.astype('float32'))
 
-    def retrieve(self, query: str, top_k: int = 5, rebound_depth: int = 0, extra_terms: List[str] = None) -> List[Dict]:
+    def retrieve(self, query: str, top_k: int = 5, rebound_depth: int = 0, extra_terms: List[str] = None, mode: str = "FACTUAL") -> List[Dict]:
         """Hybrid retrieval with Just-In-Time indexing and Reranking.
         
         EPHEMERAL INDEXING: Each call creates a fresh JIT index to prevent
@@ -327,8 +343,10 @@ class RAGSystem:
             top_k: Number of results to return
             rebound_depth: Recursion depth for adaptive RAG (0 = initial, 1 = rebound)
             extra_terms: Additional search terms to force into the pipeline (used in rebound)
+            mode: Operational mode (e.g., "FACTUAL", "CODE") to guide joint reasoning
         """
-
+        if self.online_mode and self.web_retriever:
+            return self.retrieve_web(query, top_k)
 
         debug_print("=" * 70)
         debug_print(f"RETRIEVE CALLED: query='{query}', top_k={top_k}")
@@ -660,7 +678,7 @@ class RAGSystem:
             print("Filtering chunks with Joint 3...")
             try:
                 # Pass entity_info for comparison-aware filtering
-                filtered_chunks = self.filter_joint.filter(query, chunks_to_filter, top_k, entity_info=entity_info)
+                filtered_chunks = self.filter_joint.filter(query, chunks_to_filter, top_k, entity_info=entity_info, mode=mode)
                 debug_print(f"Joint 3 returned {len(filtered_chunks)} filtered chunks")
                 
                 # Convert back to (idx, score) format
@@ -752,44 +770,65 @@ class RAGSystem:
         debug_print("PHASE 5: FACT REFINEMENT (JOINT 4)")
         
         extracted_facts = []
-        if self.use_joints and self.fact_joint and reranked_results:
+        if self.use_joints and self.fact_joint and reranked_results and mode != "CODE":
             debug_print("Using Joint 4 for fact refinement...")
             try:
-                # Identify Top Article
-                top_idx, top_score = reranked_results[0]
-                if top_idx < len(self.documents):
+                # Loop through top 3 candidates to find supporting evidence
+                candidates_to_check = reranked_results[:3]
+                found_support = False
+                verification_failures = []
+                
+                for i, (top_idx, top_score) in enumerate(candidates_to_check):
+                    if top_idx >= len(self.documents):
+                        continue
+                        
                     top_doc = self.documents[top_idx]
                     path = top_doc.get('path')
                     zim_path = top_doc.get('source_zim')
                     title = top_doc.get('title', 'Unknown')
                     
-                    if path and zim_path:
-                        debug_print(f"Refining facts from top article: '{title}' ({path})")
-                        print(f"Scanning '{title}' for specific details...")
+                    if not (path and zim_path):
+                        continue
                         
-                        # Open ZIM and get full text
-                        zim = libzim.Archive(zim_path)
-                        entry = zim.get_entry_by_path(path)
-                        item = entry.get_item()
-                        full_text = TextProcessor.extract_text(item.content)
+                    debug_print(f"Refining facts from candidate {i+1}: '{title}' ({path})")
+                    print(f"Scanning '{title}' for specific details...")
+                    
+                    # Open ZIM and get full text
+                    zim = libzim.Archive(zim_path)
+                    entry = zim.get_entry_by_path(path)
+                    item = entry.get_item()
+                    full_text = TextProcessor.extract_text(item.content)
+                    
+                    # PREMISE VERIFICATION (Systems Fix)
+                    verification = self.fact_joint.verify_premise(query, full_text)
+                    
+                    if verification['status'] == 'SUPPORTED':
+                        debug_print(f"Premise SUPPORTED by candidate {i+1}")
+                        found_support = True
                         
-                        # 5a. Fact Extraction
-                        extracted_facts = self.fact_joint.refine_facts(query, full_text)
+                        # Extract facts from this supporting article
+                        facts = self.fact_joint.refine_facts(query, full_text)
+                        if facts:
+                            print(f"Found {len(facts)} verified details.")
+                            extracted_facts.extend(facts)
+                        break # Stop checking once we find support
                         
-                        if extracted_facts:
-                            print(f"Found {len(extracted_facts)} verified details.")
-                            debug_print(f"Facts: {extracted_facts}")
-                        else:
-                            debug_print("No specific facts found.")
-                            
-                        # 5b. PREMISE VERIFICATION (Systems Fix)
-                        # Check strictly if the retrieved text supports the user's premise
-                        verification = self.fact_joint.verify_premise(query, full_text)
-                        if verification['status'] in ['CONTRADICTED', 'UNSUPPORTED']:
-                            debug_print(f"[SYSTEM ALERT] Premise check failed: {verification['status']}")
-                            print(f"Wait... {verification['reason']}")
-                            # Inject override as a fact
-                            extracted_facts.insert(0, f"[SYSTEM ALERT - PREMISE INCORRECT]: {verification['reason']}")
+                    elif verification['status'] == 'CONTRADICTED':
+                        debug_print(f"Candidate {i+1} result: {verification['status']} ({verification['reason']})")
+                        verification_failures.append(verification['reason'])
+                        
+                    else:
+                        # UNSUPPORTED (Irrelevant text)
+                        # Do not treat as a failure/blocker, just skip facts
+                        debug_print(f"Candidate {i+1} result: {verification['status']} (Skipping facts, no alert)")
+                
+                # Only alert if we found NO support AND we found explicit contradictions
+                if not found_support and verification_failures:
+                    debug_print(f"[SYSTEM ALERT] Premise explicitly contradicted in {len(verification_failures)} articles.")
+                    primary_reason = verification_failures[0]
+                    print(f"Wait... {primary_reason}")
+                    # Inject override as a fact
+                    extracted_facts.insert(0, f"[SYSTEM ALERT - PREMISE INCORRECT]: {primary_reason}")
 
             except Exception as e:
                 debug_print(f"Joint 4 failed: {type(e).__name__}: {e}")
@@ -923,7 +962,7 @@ class RAGSystem:
                 zim = libzim.Archive(current_zim_path)
                 searcher = libzim.SuggestionSearcher(zim)
                 
-                clean_query = query.replace("?", "").replace(".", "").replace("!", "")
+                clean_query = query.replace("?", "").replace(".", "").replace("!", "").replace("_", " ")
                 tokens = clean_query.split()
                 
                 # Extended stop words: includes instructional/generic terms
@@ -939,6 +978,7 @@ class RAGSystem:
                     # Instructional words (common false positive triggers)
                     "tell", "me", "explain", "describe", "define", "show", "give", "find", "get",
                     "introduced", "features", "list", "main", "what", "overview", "details", "information",
+                    "best", "way", "good", "bad", "better", "worse", "how", "to", "secure", "protect", # NEW: qualitative words
                     # Comparison words
                     "comparing", "compare", "difference", "different", "between", "versus", "vs", "summary",
                     # Format words
@@ -965,15 +1005,20 @@ class RAGSystem:
                 
                 hits_map = {} 
                 
-                # Strategy 1: Individual keywords (Try subjects first)
-                # Reverse sort by length or manually pick likely subjects
+                # Strategy 1: Individual keywords (Try subjects first) with Singular/Plural Expansion
                 sorted_keywords = sorted(keywords, key=len, reverse=True)
-                for kw in sorted_keywords[:3]:
-                    debug_print(f"RAG:   Trying keyword title search: '{kw}'")
-                    results = searcher.suggest(kw)
-                    if results.getEstimatedMatches() > 0:
-                         self._collect_hits(zim, results, hits_map, full_text, source=current_zim_path)
-                         if len(hits_map) >= 5: break
+                for kw in sorted_keywords[:4]:
+                    search_terms = {kw}
+                    if kw.endswith('s') and len(kw) > 3:
+                        search_terms.add(kw[:-1]) # Try singular
+                    
+                    for term in search_terms:
+                        debug_print(f"RAG:   Trying keyword title search: '{term}'")
+                        results = searcher.suggest(term)
+                        if results.getEstimatedMatches() > 0:
+                             self._collect_hits(zim, results, hits_map, full_text, source=current_zim_path)
+                             if len(hits_map) >= 5: break
+                    if len(hits_map) >= 5: break
 
                 # Strategy 2: Full phrase (Less reliable for prefix search)
                 if len(hits_map) < 3 and keywords:
@@ -1038,6 +1083,19 @@ class RAGSystem:
         # Deduplicate results across ZIMs (unlikely overlap but possible with titles)
         # We'll just return top 25 total to ensure diversity from multiple ZIMs
         debug_print(f"Total results across all ZIMs: {len(all_results)}")
+        
+        # Fix 2: Prioritize Wikipedia ZIMs
+        # Sort results so that hits from ZIMs containing 'wikipedia' come first
+        def get_priority(hit):
+            src = hit['metadata'].get('source_zim', '').lower()
+            if 'wikipedia' in src:
+                return 2
+            if 'stackexchange' in src or 'serverfault' in src or 'superuser' in src:
+                return 1
+            return 0
+            
+        all_results.sort(key=lambda x: (get_priority(x), x.get('score', 0)), reverse=True)
+        
         return all_results[:25]
 
     def search_by_embedding(self, query: str, top_k: int = 5, zim_path: str = None, full_text: bool = False) -> List[Dict]:
@@ -1137,6 +1195,13 @@ class RAGSystem:
                             },
                             'score': 1.0
                         }
+                        
+                        # Fix 1: Hard Filter for "User" profiles (StackExchange pollution)
+                        if entry.title.startswith("User "):
+                            debug_print(f"      Skipping User profile: {entry.title}")
+                            del hits_map[hit_path]
+                            continue
+                            
                         debug_print(f"      Added hit: {entry.title}")
                 except Exception as inner_e:
                     debug_print(f"      Error processing hit {hit_path}: {inner_e}")

@@ -38,8 +38,9 @@ def stream_chat(model: str, messages: List[dict]) -> Iterable[str]:
     
     try:
         # Get model instance (caching handled by manager)
-        # Use 8192 context for main chat to allow for heavy RAG
-        llm = ModelManager.get_model(model, n_ctx=8192)
+        # Use global config context or default to 16384
+        n_ctx = getattr(config, 'DEFAULT_CONTEXT_SIZE', 16384)
+        llm = ModelManager.get_model(model, n_ctx=n_ctx)
         
         debug_print("Starting local generation stream...")
         stream = llm.create_chat_completion(
@@ -70,7 +71,8 @@ def full_chat(model: str, messages: List[dict]) -> str:
     debug_print(f"full_chat called with model='{model}'")
     
     try:
-        llm = ModelManager.get_model(model, n_ctx=8192)
+        n_ctx = getattr(config, 'DEFAULT_CONTEXT_SIZE', 16384)
+        llm = ModelManager.get_model(model, n_ctx=n_ctx)
         
         resp = llm.create_chat_completion(
             messages=messages,
