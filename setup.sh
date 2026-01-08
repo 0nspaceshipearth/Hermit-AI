@@ -102,6 +102,36 @@ HERMIT_EOF
 sudo chmod +x "$HERMIT_WRAPPER"
 echo "✓ 'hermit' command installed"
 
+# Enable 'forge' command (ZIM creator)
+echo "Setting up 'forge' command..."
+FORGE_WRAPPER="/usr/local/bin/forge"
+sudo tee "$FORGE_WRAPPER" > /dev/null << FORGE_EOF
+#!/usr/bin/env bash
+INSTALL_DIR="$SCRIPT_DIR"
+
+if [ ! -d "\$INSTALL_DIR" ]; then
+    echo "❌ Error: Hermit installation directory not found at:"
+    echo "   \$INSTALL_DIR"
+    exit 1
+fi
+
+if [ -f "\$INSTALL_DIR/forge.py" ]; then
+    exec "\$INSTALL_DIR/venv/bin/python" "\$INSTALL_DIR/forge.py" "\$@"
+else
+    echo "❌ Error: forge.py not found in \$INSTALL_DIR"
+    exit 1
+fi
+FORGE_EOF
+sudo chmod +x "$FORGE_WRAPPER"
+echo "✓ 'forge' command installed"
+
+# Install optional document parsing dependencies for Forge
+echo ""
+echo "Installing optional Forge dependencies (PDF, DOCX support)..."
+./venv/bin/pip install pypdf python-docx ebooklib markdown >> setup.log 2>&1 || true
+echo "✓ Document parsers installed"
+
 echo ""
 echo "=== Setup Complete! ==="
 echo "Run the chatbot with: hermit"
+echo "Create ZIM files with: forge"

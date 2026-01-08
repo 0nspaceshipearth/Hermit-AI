@@ -28,7 +28,8 @@ class UninstallerGUI:
             "venv": tk.BooleanVar(value=True),
             "models": tk.BooleanVar(value=False),
             "data": tk.BooleanVar(value=True),
-            "hermit": tk.BooleanVar(value=False)
+            "hermit": tk.BooleanVar(value=False),
+            "forge": tk.BooleanVar(value=False)
         }
         
         # Paths
@@ -37,7 +38,8 @@ class UninstallerGUI:
             "venv": self.base_dir / "venv",
             "models": self.base_dir / "shared_models",
             "data": self.base_dir / "data",
-            "hermit": Path("/usr/local/bin/hermit")
+            "hermit": Path("/usr/local/bin/hermit"),
+            "forge": Path("/usr/local/bin/forge")
         }
         
         # Components Frame
@@ -53,6 +55,8 @@ class UninstallerGUI:
                            "Removes cached vectors and JIT indexes.")
         self.create_checkbox("hermit", "System Command (hermit)", 
                            "Removes the /usr/local/bin/hermit wrapper (Requires Sudo).")
+        self.create_checkbox("forge", "System Command (forge)", 
+                           "Removes the /usr/local/bin/forge wrapper (Requires Sudo).")
         
         # Protection Note
         protection_frame = ttk.LabelFrame(root, text="🛡️ Safety Protection", padding=10)
@@ -143,7 +147,7 @@ class UninstallerGUI:
                 if not path.exists():
                     continue
                     
-                if key == "hermit":
+                if key in ("hermit", "forge"):
                     # Requires sudo
                     self.run_sudo_remove(path)
                 elif path.is_dir():

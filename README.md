@@ -4,13 +4,13 @@
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
 [![CUDA Accelerated](https://img.shields.io/badge/CUDA-Accelerated-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
 
-> 🧠 **A privacy-first, offline AI chatbot** powered by local LLMs and Retrieval-Augmented Generation (RAG). Chat with Wikipedia, documentation, or any ZIM archive — completely offline, 100% private.
+>  **A privacy-first, offline AI chatbot** powered by local LLMs and Retrieval-Augmented Generation (RAG). Chat with Wikipedia, documentation, or any ZIM archive — completely offline, 100% private.
 
 **No cloud. No API keys. No data leaves your machine.**
 
 ---
 
-## ✨ Key Features
+##  Key Features
 
 | Feature | Description |
 |---------|-------------|
@@ -20,11 +20,12 @@
 | ⚡ **GPU Accelerated** | CUDA support for fast inference on NVIDIA GPUs |
 | 🎯 **Multi-Joint Architecture** | Unique 3-stage reasoning pipeline for accurate answers |
 | 🔍 **Hybrid Search** | Combines keyword (BM25) + semantic (FAISS) retrieval |
+| 🔨 **Forge ZIM Creator** | Build your own knowledge bases from PDF, DOCX, TXT, Markdown |
 | 🛡️ **Privacy First** | Your data never leaves your computer |
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -69,9 +70,20 @@ hermit --cli        # Start in terminal mode
 hermit --debug      # Start with verbose logging
 ```
 
+### Create Your Own ZIM (Forge)
+
+Use **Forge** to create custom knowledge bases from your documents:
+
+```bash
+forge               # Launch Forge GUI
+forge /path/to/docs -o myknowledge.zim  # CLI mode
+```
+
+**Supported formats:** TXT, Markdown, PDF, DOCX, HTML, EPUB
+
 ---
 
-## 🏗️ How It Works — Multi-Joint RAG Architecture
+## How It Works — Multi-Joint RAG Architecture
 
 Hermit uses a unique **Multi-Joint Architecture** that chains specialized reasoning stages:
 
@@ -132,7 +144,7 @@ Any GGUF model from Hugging Face works. Recommended:
 
 ---
 
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 ### "Failed to create llama_context" (Out of Memory)
 Your GPU ran out of VRAM. Solutions:
