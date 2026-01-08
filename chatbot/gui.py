@@ -193,7 +193,7 @@ class ChatbotGUI:
         self.link_mode = False  # Default to Response mode
         
         self.root = self.tk.Tk()
-        self.root.title(f"Chatbot - {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+        self.root.title(f"VaultRAG - {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
         self.root.geometry("900x700")
         
         # Chat display

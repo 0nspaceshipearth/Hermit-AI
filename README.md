@@ -1,4 +1,4 @@
-# KiwixRAG
+# VaultRAG
 
 A powerful offline-capable chatbot with **Retrieval-Augmented Generation (RAG)** that lets you chat with AI using local knowledge bases like Wikipedia, Python documentation, or any ZIM file archive.
 
@@ -40,7 +40,7 @@ chmod +x setup.sh
 
 **Step 3: Start the chatbot**
 ```bash
-krag
+vrag
 ```
 
 ### Uninstallation
@@ -68,7 +68,7 @@ This tool allows you to safely remove the virtual environment, models, and cache
 
 ## How It Works
 
-KiwixRAG uses a **Local Multi-Joint Architecture**:
+VaultRAG uses a **Local Multi-Joint Architecture**:
 
 1.  **Joint 1 (Entity extraction)**: Analyzes your query to find key terms.
 2.  **Retrieval**: Searches the ZIM file using a hybrid of Keyword (BM25-like) and Semantic (Embeddings) search.
@@ -93,7 +93,7 @@ You can change these to any Hugging Face repo ID containing GGUF files.
 This means you ran out of VRAM. The system now has a protections against this, but if you see it, ensure no other GPU-heavy apps are running.
 
 ### "CUDA not available"
-If `krag` says it's using CPU:
+If `vrag` says it's using CPU:
 1.  Ensure you have NVIDIA drivers installed.
 2.  Re-run `./setup.sh` to reinstall PyTorch.
 
@@ -102,4 +102,4 @@ Run `./setup.sh` again to fix any broken python packages.
 
 ---
 
-**License**: This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+**License**: This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)** - see the [LICENSE](LICENSE) file for details.

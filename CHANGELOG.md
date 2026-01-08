@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [2.3.0] - 2026-01-08
+
+### Changed
+- **Project Rename**: Renamed project from "KiwixRAG" to "**VaultRAG**" to better reflect its function as a secure, offline knowledge vault.
+- **License**: Switched from MIT License to **AGPL v3** to ensure the project remains free and open-source, preventing proprietary closed-source forks.
+- **Command**: Renamed the system command from `krag` to `vrag`.
+
 ## [2.2.0] - 2026-01-07
 
 ### Added
@@ -87,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Launcher**: Updated `run_chatbot.py` to robustly handle accidental query arguments.
 
 ### Removed
-- Removed purely keyword-based retrieval fallback in favor of the Multi-Joint approach.
+- **Removed purely keyword-based retrieval fallback in favor of the Multi-Joint approach.**
 
 ## [1.1.0] - 2025-12-06
 
@@ -107,6 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2025-12-05
 ### Added
-- Initial release of KiwixRAG.
-- Offline RAG system using FAISS and LanceDB/LibZIM.
-- Basic GUI with Tkinter.
+- **Initial release of VaultRAG (prev. KiwixRAG).**
+- **Offline RAG system using FAISS and LanceDB/LibZIM.**
+- **Basic GUI with Tkinter.**

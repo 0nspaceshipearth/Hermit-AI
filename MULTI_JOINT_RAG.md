@@ -2,7 +2,7 @@
 
 ## Overview
 
-The KiwixRAG system now uses a **multi-joint architecture** where small reasoning models guide each stage of retrieval to prevent hallucinations and improve answer accuracy.
+The VaultRAG system now uses a **multi-joint architecture** where small reasoning models guide each stage of retrieval to prevent hallucinations and improve answer accuracy.
 
 ## Architecture
 
@@ -67,7 +67,7 @@ FILTER_JOINT_TEMP = 0.1  # Deterministic filtering
 When running with `--debug`, you'll see detailed joint decisions:
 
 ```bash
-krag --debug "how did tupac die?"
+vrag --debug "how did tupac die?"
 ```
 
 Example output:
@@ -162,11 +162,11 @@ Test the joint system:
 
 ```bash
 # With debug output
-k rag --debug "how did tupac die?"
+vrag --debug "how did tupac die?"
 
 # Compare with joints disabled
 # Edit config.py: USE_JOINTS = False
-krag "how did tupac die?"
+vrag "how did tupac die?"
 ```
 
 ## Future Enhancements

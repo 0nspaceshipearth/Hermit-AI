@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== KiwixRAG Setup Script ==="
+echo "=== VaultRAG Setup Script ==="
 echo "Sets up the local AI environment with GPU support."
 echo ""
 
@@ -71,17 +71,17 @@ mkdir -p "$SHARED_MODELS"
 echo "✓ Model directory verified: $SHARED_MODELS"
 echo "  (Models will be automatically downloaded here on first run)"
 
-# Enable 'krag' command
+# Enable 'vrag' command
 echo ""
-echo "Setting up 'krag' command..."
-KRAG_WRAPPER="/usr/local/bin/krag"
-sudo tee "$KRAG_WRAPPER" > /dev/null << KRAG_EOF
+echo "Setting up 'vrag' command..."
+VRAG_WRAPPER="/usr/local/bin/vrag"
+sudo tee "$VRAG_WRAPPER" > /dev/null << VRAG_EOF
 #!/usr/bin/env bash
 INSTALL_DIR="$SCRIPT_DIR"
 
 # Check if directory exists and give helpful error if not (common with external drives)
 if [ ! -d "\$INSTALL_DIR" ]; then
-    echo "❌ Error: KiwixRAG installation directory not found at:"
+    echo "❌ Error: VaultRAG installation directory not found at:"
     echo "   \$INSTALL_DIR"
     echo ""
     echo "👉 If this is on an external drive, please ensure it is MOUNTED."
@@ -98,10 +98,10 @@ else
     echo "   The installation might be corrupted. Try re-running setup.sh"
     exit 1
 fi
-KRAG_EOF
-sudo chmod +x "$KRAG_WRAPPER"
-echo "✓ 'krag' command installed"
+VRAG_EOF
+sudo chmod +x "$VRAG_WRAPPER"
+echo "✓ 'vrag' command installed"
 
 echo ""
 echo "=== Setup Complete! ==="
-echo "Run the chatbot with: krag"
+echo "Run the chatbot with: vrag"
