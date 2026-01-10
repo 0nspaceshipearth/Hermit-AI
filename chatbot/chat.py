@@ -17,7 +17,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-"""Ollama chat API integration."""
+"""Local LLM chat integration."""
 
 import sys
 import json
@@ -191,7 +191,7 @@ def retrieve_and_display_links(query: str) -> List[dict]:
 
 
 def build_messages(system_prompt: str, history: List[Message], user_query: str = None) -> List[dict]:
-    """Build message list for Ollama API with RAG augmentation."""
+    """Build message list for local LLM with RAG augmentation."""
     debug_print("="*60)
     debug_print("build_messages START")
     debug_print(f"system_prompt length: {len(system_prompt)} chars")

@@ -181,7 +181,7 @@ class DownloadProgressDialog:
 
 
 class ChatbotGUI:
-    """Full-featured GUI chatbot interface for Ollama."""
+    """Full-featured GUI chatbot interface."""
     
     def __init__(self, model: str = None, system_prompt: str = None, streaming_enabled: bool = True):
         try:

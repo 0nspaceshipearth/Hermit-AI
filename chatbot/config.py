@@ -19,7 +19,7 @@
 
 """Configuration constants."""
 
-OLLAMA_CHAT_URL = "N/A" # Deprecated
+OLLAMA_CHAT_URL = "N/A" # Legacy/Deprecated
 # Local Model Repositories
 MODEL_ALETHEIA_3B = "Ishaanlol/Aletheia-Llama-3.2-3B" 
 MODEL_QWEN_7B = "Qwen/Qwen2.5-7B-Instruct-GGUF"

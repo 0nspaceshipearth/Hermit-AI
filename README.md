@@ -1,95 +1,61 @@
-# Hermit — Offline AI Chatbot for ZIM Files
-
-**Copyright (C) 2026 Hermit-AI, Inc.**
+# hermit: offline ai chatbot for zim files
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
-[![Commercial License](https://img.shields.io/badge/License-Commercial-purple.svg)](COMMERCIAL_LICENSE_OPTIONS.md)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
 [![CUDA Accelerated](https://img.shields.io/badge/CUDA-Accelerated-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
 
-> **A privacy-first, offline AI chatbot** powered by local LLMs and Retrieval-Augmented Generation (RAG). Chat with Wikipedia, documentation, or any ZIM archive — completely offline, 100% private.
-
-**No cloud. No API keys. No data leaves your machine.**
+**hermit** is a privacy-first, 100% offline ai chatbot that lets you chat with wikipedia or any other .zim archive. no cloud, no api keys, no tracking. everything stays on your machine.
 
 ---
-<img width="895" height="697" alt="Screenshot_20260108_200832" src="https://github.com/user-attachments/assets/a60de92a-38cf-42a8-bd31-ca96429d5bf5" />
+<img width="895" height="697" alt="hermit screenshot" src="https://github.com/user-attachments/assets/a60de92a-38cf-42a8-bd31-ca96429d5bf5" />
 
-## Key Features
+*chatting with offline wikipedia*
 
-| Feature | Description |
-|---------|-------------|
-| **100% Offline** | Runs entirely on your local machine after initial setup |
-| **Local LLM** | Uses GGUF models via `llama-cpp-python` — no OpenAI needed |
-| **Wikipedia RAG** | Chat with offline Wikipedia using [Kiwix ZIM files](https://library.kiwix.org/) |
-| **GPU Accelerated** | CUDA support for fast inference on NVIDIA GPUs |
-| **Multi-Joint Architecture** | Unique 3-stage reasoning pipeline for accurate answers |
-| **Hybrid Search** | Combines keyword (BM25) + semantic (FAISS) retrieval |
-| **Forge ZIM Creator** | Build your own knowledge bases from PDF, DOCX, TXT, Markdown |
-| **Privacy First** | Your data never leaves your computer |
+### why?
+i wanted a way to search massive knowledge bases like wikipedia without needing an internet connection. hermit uses a "multi-joint" rag setup to make sure it actually reads the articles before answering, which cuts down on hallucinations a lot.
+
+### features
+- **100% local**: runs via `llama-cpp-python` — you don't even need ollama installed.
+- **wikipedia rag**: search and chat with any [kiwix zim file](https://library.kiwix.org/).
+- **gpu fast**: supports cuda for rtx cards so it's snappy.
+- **smart retrieval**: uses a multi-stage pipeline to extract entities and score articles before answering.
+- **forge**: tool to turn your own pdfs/docs into zim files for hermit to read.
 
 ---
 
-## Quick Start
+### quick start
 
-### Prerequisites
-
-- **OS**: Linux (Ubuntu/Debian tested)
-- **GPU**: NVIDIA RTX 3060+ recommended (8GB+ VRAM)
-- **RAM**: 12GB+ system memory
-- **Python**: 3.8+
-
-### Installation
+**prerequisites:**
+- linux (ubuntu/debian works best)
+- python 3.8+
+- nvidia gpu recommended (rtx 3060+ / 8gb+ vram)
+- 12gb+ system ram
 
 ```bash
-# Clone the repository
+# clone and setup
 git clone https://github.com/imDelivered/Hermit-AI.git
 cd Hermit-AI
-
-# Run the setup script
 chmod +x setup.sh
 ./setup.sh
 ```
 
-> **What setup.sh does:**
-> - Installs system dependencies (Python, libzim, CUDA toolkit)
-> - Creates an isolated virtual environment
-> - Installs PyTorch with CUDA 12.1 support
-> - Compiles `llama-cpp-python` with GPU acceleration
-> - Creates the `hermit` command system-wide
+the setup script handles the venv, torch, and builds `llama-cpp-python` with cuda support.
 
-### Add Your Knowledge Base
+### how to use
 
-Download a ZIM file from [Kiwix Library](https://library.kiwix.org/) and place it in the project root:
+grab a .zim file from the [kiwix library](https://library.kiwix.org/) and drop it in the project folder.
 
 ```bash
-# Example: Download Wikipedia
-wget https://download.kiwix.org/zim/wikipedia_en_all_maxi.zim
+hermit        # starts the gui
+hermit --cli  # run in your terminal
+hermit --debug # verbose logging
 ```
-
-### Launch Hermit
-
-```bash
-hermit              # Start the GUI
-hermit --cli        # Start in terminal mode
-hermit --debug      # Start with verbose logging
-```
-
-### Create Your Own ZIM (Forge)
-
-Use **Forge** to create custom knowledge bases from your documents:
-
-```bash
-forge               # Launch Forge GUI
-forge /path/to/docs -o myknowledge.zim  # CLI mode
-```
-
-**Supported formats:** TXT, Markdown, PDF, DOCX, HTML, EPUB
 
 ---
 
-## How It Works — Multi-Joint RAG Architecture
+### how it works (the multi-joint pipeline)
 
-Hermit uses a unique **Multi-Joint Architecture** that chains specialized reasoning stages:
+instead of just doing a basic vector search, hermit chains a few small models together:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -112,90 +78,50 @@ Hermit uses a unique **Multi-Joint Architecture** that chains specialized reason
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why Multi-Joint?**
-- Reduces hallucinations by grounding in retrieved facts
-- Uses specialized small models for each reasoning step
-- GBNF grammar enforcement ensures valid JSON at every stage
-- Just-in-time indexing — no pre-processing wait
+this adds about 1 second of latency but makes the answers way more reliable.
 
 ---
 
-## Configuration
+### forge: create your own zim files
 
-### Models
-
-Edit `chatbot/config.py` to customize:
-
-```python
-# Default model (auto-downloads from Hugging Face)
-DEFAULT_MODEL = "Ishaanlol/Aletheia-Llama-3.2-3B"
-
-# Joint models (entity extraction, scoring, filtering)
-ENTITY_JOINT_MODEL = DEFAULT_MODEL
-SCORER_JOINT_MODEL = DEFAULT_MODEL
-FILTER_JOINT_MODEL = DEFAULT_MODEL
-
-# Context window size
-DEFAULT_CONTEXT_SIZE = 16384
-```
-
-### Supported Models
-
-Any GGUF model from Hugging Face works. Recommended:
-- **Aletheia 3B** (default) — Fast, accurate
-- **Llama 3.2 3B** — Great reasoning
-- **Mistral 7B** — More capable, needs 12GB+ VRAM
-
----
-
-## Troubleshooting
-
-### "Failed to create llama_context" (Out of Memory)
-Your GPU ran out of VRAM. Solutions:
-1. Close other GPU applications
-2. Use a smaller model
-3. Reduce `DEFAULT_CONTEXT_SIZE` in config
-
-### "CUDA not available"
-If Hermit uses CPU instead of GPU:
-1. Ensure NVIDIA drivers are installed: `nvidia-smi`
-2. Re-run `./setup.sh` to reinstall PyTorch with CUDA
-
-### "Dependencies missing"
-```bash
-./setup.sh  # Re-run to fix broken packages
-```
-
----
-
-## Uninstallation
+use **forge** to build custom knowledge bases from your own documents:
 
 ```bash
-./uninstall.sh
+forge               # launch forge gui
+forge /path/to/docs -o myknowledge.zim  # cli mode
 ```
 
-The GUI uninstaller lets you selectively remove:
-- Virtual environment
-- Downloaded models
-- Search indexes
-- **Your ZIM files are always protected**
+**supported formats:** txt, markdown, pdf, docx, html, epub
 
 ---
 
-## Contributing
+### troubleshooting
 
-Contributions welcome! Please read the codebase and open a PR.
+**"Failed to create llama_context" (out of memory)**
+your gpu ran out of vram. try:
+1. close other gpu apps
+2. use a smaller model
+3. reduce `DEFAULT_CONTEXT_SIZE` in `chatbot/config.py`
+
+**"CUDA not available"**
+hermit is using cpu instead of gpu:
+1. check nvidia drivers: `nvidia-smi`
+2. re-run `./setup.sh` to rebuild torch with cuda
+
+**"Dependencies missing"**
+```bash
+./setup.sh  # re-run to fix broken packages
+```
 
 ---
 
-## License
+### roadmap
+- [ ] openai-compatible endpoint support (so you can use your own llama-server/ollama/whatever).
+- [ ] support for more document formats in forge.
+- [ ] adaptive rag (skipping joints for simple questions).
 
-This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-
-See [LICENSE](LICENSE) for details.
+### license
+licensed under **agpl v3**. see [LICENSE](LICENSE) for the full text.
 
 ---
-
-<p align="center">
-  <b>Hermit</b> — Your offline AI companion
-</p>
+made with <3 for the offline-first community.
