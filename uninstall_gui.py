@@ -54,11 +54,19 @@ class UninstallerGUI:
         # Paths
         self.base_dir = Path(__file__).parent.absolute()
         self.paths = {
-            "venv": self.base_dir / "venv",
-            "models": self.base_dir / "shared_models",
-            "data": self.base_dir / "data",
-            "hermit": Path("/usr/local/bin/hermit"),
-            "forge": Path("/usr/local/bin/forge")
+
+            "venv": [self.base_dir / "venv"],
+            "models": [self.base_dir / "shared_models"],
+            "data": [self.base_dir / "data"],
+            "hermit": [
+                Path("/usr/local/bin/hermit"),
+                Path("/usr/share/applications/hermit.desktop"),
+                Path("/usr/share/pixmaps/hermit.png")
+            ],
+            "forge": [
+                Path("/usr/local/bin/forge"),
+                Path("/usr/share/applications/forge.desktop")
+            ]
         }
         
         # Components Frame
@@ -109,6 +117,8 @@ class UninstallerGUI:
     def get_dir_size(self, path):
         total = 0
         try:
+            if not path.exists():
+                return 0
             if path.is_file():
                 return path.stat().st_size
             for entry in path.rglob('*'):
@@ -129,8 +139,8 @@ class UninstallerGUI:
         total_size = 0
         for key, var in self.vars.items():
             if var.get():
-                path = self.paths[key]
-                if path.exists():
+                path_list = self.paths[key]
+                for path in path_list:
                     total_size += self.get_dir_size(path)
         
         self.size_label.config(text=f"Space to be freed: {self.format_size(total_size)}")
@@ -155,27 +165,32 @@ class UninstallerGUI:
         success = []
         
         for key in selected_keys:
-            path = self.paths[key]
+            path_list = self.paths[key]
             
-            # EXTRA SAFETY CHECK: Ensure we never delete a ZIM file
-            if str(path).endswith(".zim"):
-                errors.append(f"Skipped {key}: Safety check prevented deleting .zim file")
-                continue
-                
-            try:
-                if not path.exists():
+            for path in path_list:
+                # EXTRA SAFETY CHECK: Ensure we never delete a ZIM file
+                if str(path).endswith(".zim"):
+                    errors.append(f"Skipped {path}: Safety check prevented deleting .zim file")
                     continue
                     
-                if key in ("hermit", "forge"):
-                    # Requires sudo
-                    self.run_sudo_remove(path)
-                elif path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-                success.append(key)
-            except Exception as e:
-                errors.append(f"Failed to remove {key}: {str(e)}")
+                try:
+                    if not path.exists():
+                        continue
+                        
+                    # Check if it requires sudo (system directories)
+                    is_system = str(path).startswith("/usr")
+                    
+                    if is_system:
+                        # Requires sudo
+                        self.run_sudo_remove(path)
+                    elif path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                except Exception as e:
+                    errors.append(f"Failed to remove {path}: {str(e)}")
+            
+            success.append(key)
 
         # Clean __pycache__ if removing venv
         if "venv" in selected_keys:
