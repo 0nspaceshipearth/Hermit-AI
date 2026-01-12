@@ -205,12 +205,28 @@ class UninstallerGUI:
         # Refresh desktop database and icon cache if system files were removed
         if "hermit" in selected_keys or "forge" in selected_keys:
             try:
+                # Update user's local desktop database (no sudo needed)
                 if shutil.which("update-desktop-database"):
-                    # Use sudo if we can, or just try running it
-                    subprocess.run(["sudo", "update-desktop-database"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    user_apps = Path.home() / ".local/share/applications"
+                    if user_apps.exists():
+                        subprocess.run(
+                            ["update-desktop-database", str(user_apps)],
+                            timeout=5,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
                 
-                if shutil.which("gtk-update-icon-cache"):
-                    subprocess.run(["sudo", "gtk-update-icon-cache", "-f", "/usr/share/icons/hicolor"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Update system database using pkexec (GUI prompt) or skip if not available
+                if shutil.which("pkexec") and shutil.which("update-desktop-database"):
+                    subprocess.run(
+                        ["pkexec", "update-desktop-database", "/usr/share/applications"],
+                        timeout=30,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+            except subprocess.TimeoutExpired:
+                # User might have cancelled the pkexec prompt, that's okay
+                pass
             except Exception:
                 pass
 
