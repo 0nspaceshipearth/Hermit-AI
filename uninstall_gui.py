@@ -29,7 +29,13 @@ class UninstallerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Hermit Uninstaller")
-        self.root.geometry("500x450")
+        self.root.geometry("600x550")
+        
+        # Make window appear on top and grab focus
+        self.root.lift()
+        self.root.attributes('-topmost', True)
+        self.root.after_idle(self.root.attributes, '-topmost', False)
+        self.root.focus_force()
         
         # Style
         style = ttk.Style()
