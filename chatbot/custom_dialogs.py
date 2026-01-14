@@ -45,12 +45,12 @@ class CustomMessageDialog:
         
         # Icon (Text-based for minimal deps)
         icon_map = {
-            "info": "ℹ️",
-            "warning": "⚠️",
-            "error": "❌",
-            "question": "❓"
+            "info": "",
+            "warning": "",
+            "error": "",
+            "question": ""
         }
-        icon_char = icon_map.get(type_, "ℹ️")
+        icon_char = icon_map.get(type_, "")
         
         tk.Label(frame, text=icon_char, font=("Arial", 32), bg=bg_color, fg=fg_color).pack(pady=(0, 10))
         

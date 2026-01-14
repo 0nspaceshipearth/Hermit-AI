@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [2.6.0] - 2026-01-13
+
+### Added
+- **Seamless Loading Bubble**: Implemented a new loading indicator that mimics an AI message bubble.
+  - Pulses gently to indicate activity ("breathing" effect).
+  - Displays real-time status updates from the RAG system ("Thinking...", "Searching knowledge base...", "Formatting results...").
+  - seamlessly upgrades into the actual response text without visual flickering.
+
+### Changed
+- **Cleaner UI**: Removed "You:" and "AI:" text prefixes from message bubbles. The visual distinction of the bubbles (alignment/style) is sufficient and looks more modern.
+- **Link Mode UX**: Link mode now uses the new loading bubble to show search progress steps instead of just the status bar.
+
 ## [2.5.1] - 2026-01-12
 
 ### Added

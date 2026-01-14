@@ -610,13 +610,13 @@ class CoverageVerifierJoint:
                 # Direct match
                 if entity_lower in title:
                     found = True
-                    debug_print("JOINT2.5:VERIFY", f"  ✓ '{entity_name}' found in '{title}'")
+                    debug_print("JOINT2.5:VERIFY", f"  '{entity_name}' found in '{title}'")
                     break
                 # Alias match
                 for alias in aliases:
                     if alias in title:
                         found = True
-                        debug_print("JOINT2.5:VERIFY", f"  ✓ '{entity_name}' (alias '{alias}') found in '{title}'")
+                        debug_print("JOINT2.5:VERIFY", f"  '{entity_name}' (alias '{alias}') found in '{title}'")
                         break
                 if found:
                     break
@@ -625,7 +625,7 @@ class CoverageVerifierJoint:
                 covered.append(entity_name)
             else:
                 missing.append(entity_name)
-                debug_print("JOINT2.5:VERIFY", f"  ✗ '{entity_name}' NOT FOUND in any selected article")
+                debug_print("JOINT2.5:VERIFY", f"  '{entity_name}' NOT FOUND in any selected article")
         
         # Generate suggested searches for missing entities
         suggested_searches = []

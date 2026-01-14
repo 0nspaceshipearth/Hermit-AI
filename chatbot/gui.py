@@ -124,11 +124,11 @@ class DownloadProgressDialog:
         try:
             # Update status text
             status_texts = {
-                "checking": "🔍 Checking model availability...",
-                "downloading": "⬇️ Downloading model...",
-                "loading": "🔄 Loading model into GPU...",
-                "ready": "✅ Model ready!",
-                "error": "❌ Error"
+                "checking": "Checking model availability...",
+                "downloading": "Downloading model...",
+                "loading": "Loading model into GPU...",
+                "ready": "Model ready!",
+                "error": "Error"
             }
             self.status_label.config(text=status_texts.get(status, status))
             
@@ -351,12 +351,20 @@ class ChatbotGUI:
     
     def _handle_download_progress(self, status: str, progress: float, detail: str):
         """Handle download progress updates (called on main thread)."""
-        if status in ("checking", "downloading", "loading"):
+        # ONLY show dialog for actual downloading (network).
+        # "loading" (disk->RAM) and "checking" happen too often and are annoying.
+        if status == "downloading":
             # Show dialog if not already showing
             if not self.download_dialog:
                 self.download_dialog = DownloadProgressDialog(self.root, self.dark_mode)
-                self.download_dialog.show("Preparing Model...")
+                self.download_dialog.show("Downloading Model...")
             self.download_dialog.update(status, progress, detail)
+        
+        elif status == "loading" or status == "checking":
+             # Just update status bar if possible (no-op here since update_status is disabled)
+             # But definitely DO NOT show the popup dialog.
+             pass
+
             
         elif status == "ready":
             # Hide dialog after a brief delay to show completion
@@ -377,41 +385,143 @@ class ChatbotGUI:
             self.download_dialog = None
     
     def show_loading(self, text: str = "Thinking"):
-        """Show loading state in input entry with pulsating text."""
-        self.is_loading = True
-        self.loading_text = text
-        self.loading_pulse_step = 0
-        self.loading_pulse_direction = 1
-        # Store original colors to restore later
-        self._loading_original_fg = self.input_entry.cget('fg')
-        self._update_loading_display()
-        self._animate_loading_pulse()
+        """Show loading state with chat bubble."""
+        def _show():
+            # Remove any existing loading bubble first
+            self._hide_loading_internal()
+            
+            self.is_loading = True
+            
+            # Insert slightly cleaner spacing
+            self.chat_display.insert(self.tk.END, "\n")
+            
+            # Start tracking this bubble
+            message_start = self.chat_display.index(self.tk.END + "-1c")
+            
+            # prefix = "AI: " # Removed
+            # self.chat_display.insert(self.tk.END, prefix)
+            
+            # Content area
+            content_start = self.chat_display.index(self.tk.END + "-1c")
+            self.chat_display.insert(self.tk.END, text + "...")
+            content_end = self.chat_display.index(self.tk.END + "-1c")
+            
+            # Padding
+            self.chat_display.insert(self.tk.END, "    ")
+            message_end = self.chat_display.index(self.tk.END + "-1c")
+            
+            # Apply tags
+            # 1. Style tag (shared with normal AI messages)
+            style_tag = f"ai_message_{id(self)}"
+            self.chat_display.tag_add(style_tag, message_start, message_end)
+            self._configure_message_tag(style_tag, "ai")
+            
+            # 2. Loading identification tags
+            self.chat_display.tag_add("loading_bubble", message_start, message_end)
+            self.chat_display.tag_add("loading_content_text", content_start, content_end)
+            
+            self.chat_display.insert(self.tk.END, "\n\n")
+            self.chat_display.see(self.tk.END)
+            
+            # Start animation
+            self._animate_loading_pulse()
+            
+        self.root.after(0, _show)
     
-    def hide_loading(self):
-        """Hide loading state and restore input entry."""
-        self.is_loading = False
-        if self.loading_animation_id:
-            self.root.after_cancel(self.loading_animation_id)
-            self.loading_animation_id = None
-        # Restore original foreground color
-        if hasattr(self, '_loading_original_fg'):
-            self.input_entry.config(fg=self._loading_original_fg)
-        self.input_entry.delete(0, self.tk.END)
-        self.input_entry.focus_set()
+        self.root.after(0, _show)
     
-    def update_loading_text(self, text: str):
-        """Update the loading text while keeping animation."""
-        if self.is_loading:
-            self.loading_text = text
-            self._update_loading_display()
-    
-    def _update_loading_display(self):
-        """Update the loading display with current text."""
+    def transition_loading_to_response(self) -> str:
+        """
+        Transition the loading bubble into a response insertion point.
+        Returns the mark name where response text should be inserted.
+        """
         if not self.is_loading:
-            return
-        display_text = f"{self.loading_text}..."
-        self.input_entry.delete(0, self.tk.END)
-        self.input_entry.insert(0, display_text)
+            # Fallback if no bubble exists
+            self.chat_display.insert(self.tk.END, "\n")
+            ai_tag_name = f"ai_message_{id(self)}"
+            self._configure_message_tag(ai_tag_name, "ai")
+            self.chat_display.insert(self.tk.END, "", ai_tag_name)
+            return self.tk.END
+
+        # Stop animation
+        self.is_loading = False
+        
+        # Find the content range
+        ranges = self.chat_display.tag_ranges("loading_content_text")
+        if not ranges:
+            return self.tk.END
+            
+        start, end = ranges[0], ranges[1]
+        
+        # Delete the "Thinking..." text
+        self.chat_display.delete(start, end)
+        
+        # Create a mark at the insertion point for the response
+        # Using RIGHT gravity so the mark moves as we insert text
+        mark_name = "response_insert_mark"
+        self.chat_display.mark_set(mark_name, start)
+        self.chat_display.mark_gravity(mark_name, self.tk.RIGHT)
+        
+        # Clean up temporary loading tags (but KEEP the ai_message tag!)
+        self.chat_display.tag_remove("loading_bubble", "1.0", self.tk.END)
+        self.chat_display.tag_remove("loading_content_text", "1.0", self.tk.END)
+        
+        return mark_name
+
+    def hide_loading(self):
+        """Hide loading state."""
+        self.root.after(0, self._hide_loading_internal)
+        
+    def _hide_loading_internal(self):
+        """Internal helper to remove loading bubble immediately."""
+        self.is_loading = False
+        ranges = self.chat_display.tag_ranges("loading_bubble")
+        if ranges:
+            start, end = ranges[0], ranges[1]
+            
+            # Check for preceding newline to clean up spacing
+            try:
+                prev_idx = self.chat_display.index(f"{start}-1c")
+                if self.chat_display.get(prev_idx) == "\n":
+                   start = prev_idx
+            except:
+                pass
+            
+            # Delete the bubble
+            self.chat_display.delete(start, end)
+            
+            # Also clean up the trailing newlines optionally? 
+            # If we delete the block, we might want to ensure we don't leave a huge gap.
+            # But simpler is often safer.
+            
+    def update_loading_text(self, text: str):
+        """Update loading text in the bubble."""
+        def _update():
+            if not self.is_loading:
+                # If we aren't "loading" but got an update, maybe show it?
+                # No, that would be weird.
+                return
+            
+            ranges = self.chat_display.tag_ranges("loading_content_text")
+            if ranges:
+                start, end = ranges[0], ranges[1]
+                # Replace text
+                self.chat_display.delete(start, end)
+                self.chat_display.insert(start, text + "...")
+                
+                # Re-apply the content tag to the new text so next update works
+                new_end = self.chat_display.index(f"{start} + {len(text) + 3}c")
+                self.chat_display.tag_add("loading_content_text", start, new_end)
+                
+                # CRITICAL: Re-apply the main bubble tags to the new content
+                # otherwise hide_loading won't find this text to delete!
+                self.chat_display.tag_add("loading_bubble", start, new_end)
+                self.chat_display.tag_add(f"ai_message_{id(self)}", start, new_end)
+                
+                self.chat_display.see(self.tk.END)
+                
+        self.root.after(0, _update)
+
     
     def _get_pulse_color(self) -> str:
         """Get the current pulse color based on step."""
@@ -445,7 +555,9 @@ class ChatbotGUI:
         
         # Apply pulsing color
         pulse_color = self._get_pulse_color()
-        self.input_entry.config(fg=pulse_color)
+        
+        # Target the bubble text tag instead of input_entry
+        self.chat_display.tag_config("loading_content_text", foreground=pulse_color)
         
         # Schedule next frame (60ms for smooth animation)
         self.loading_animation_id = self.root.after(60, self._animate_loading_pulse)
@@ -708,7 +820,7 @@ class ChatbotGUI:
             model_window.destroy()
             self._start_model_download(repo_id)
 
-        self.ttk.Button(search_frame, text="⬇️ Download", command=download_action).pack(side='right')
+        self.ttk.Button(search_frame, text="Download", command=download_action).pack(side='right')
 
     def _start_model_download(self, repo_id: str):
         """Handle the background download process."""
@@ -727,14 +839,14 @@ class ChatbotGUI:
                 # For now, let's assume ModelManager handles standard logic.
                 
                 path = ModelManager.ensure_model_path(repo_id)
-                self.root.after(0, lambda: self.append_message("system", f"✅ Download complete: {repo_id}"))
+                self.root.after(0, lambda: self.append_message("system", f"Download complete: {repo_id}"))
                 self.root.after(0, lambda: self.update_status(f"Installed: {repo_id}"))
                 
                 # Trigger a refresh of the model menu (optional, or just ready for next use)
                 
             except Exception as e:
                  self.root.after(0, lambda: self.messagebox.showerror("Download Error", f"Failed to download {repo_id}:\n{e}"))
-                 self.root.after(0, lambda: self.append_message("system", f"❌ Download failed: {e}"))
+                 self.root.after(0, lambda: self.append_message("system", f"Download failed: {e}"))
         
         threading.Thread(target=run_dl, daemon=True).start()
     
@@ -1056,8 +1168,9 @@ class ChatbotGUI:
         
         message_start = self.chat_display.index(self.tk.END + "-1c")
         
-        prefix = "You: " if role == "user" else "AI: " if role == "ai" else "System: "
-        self.chat_display.insert(self.tk.END, prefix)
+        prefix = "System: " if role == "system" else ""
+        if prefix:
+            self.chat_display.insert(self.tk.END, prefix)
         
         if is_concept:
             start = self.chat_display.index(self.tk.END + "-1c")
@@ -1088,7 +1201,7 @@ class ChatbotGUI:
         
         message_start = self.chat_display.index(self.tk.END + "-1c")
         
-        prefix = f"🔍 Search Results for '{query}':\n"
+        prefix = f"Search Results for '{query}':\n"
         self.chat_display.insert(self.tk.END, prefix)
         
         for i, link in enumerate(links, 1):
@@ -1098,7 +1211,7 @@ class ChatbotGUI:
             path = link.get('path', '')
             
             # Create clickable link
-            link_text = f"\n{i}. 📄 {title} (Score: {score:.3f})\n"
+            link_text = f"\n{i}. {title} (Score: {score:.3f})\n"
             if snippet:
                 link_text += f"   {snippet[:150]}{'...' if len(snippet) > 150 else ''}\n"
             
@@ -1403,10 +1516,10 @@ Current Mode: {current_mode}
 Mode Description:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🤖 RESPONSE MODE (Default): Full AI responses using RAG with detailed explanations and synthesis.
+RESPONSE MODE (Default): Full AI responses using RAG with detailed explanations and synthesis.
    Use /response command to switch to this mode.
 
-🔗 LINK MODE: Fast semantic search returns clickable links to relevant articles.
+LINK MODE: Fast semantic search returns clickable links to relevant articles.
    Like Reddit AI - quickly find sources without waiting for AI generation.
    Use /links command to switch to this mode.
 
@@ -1426,7 +1539,7 @@ Keyboard Shortcuts:
   • ↑↓ Arrow keys: Navigate autocomplete suggestions
   • Tab: Select autocomplete suggestion
   • Esc: Close dialogs
-""".format(current_mode="🔗 Link Mode" if self.link_mode else "🤖 Response Mode")
+""".format(current_mode="Link Mode" if self.link_mode else "Response Mode")
         
         content_text.config(state=self.tk.NORMAL)
         content_text.insert("1.0", help_content)
@@ -1513,7 +1626,7 @@ Keyboard Shortcuts:
         self.history.append(Message(role="user", content=user_input))
         
         # Show loading state
-        self.show_loading("Searching")
+        self.show_loading("Thinking")
         
         # Get response in background
         threading.Thread(target=self.get_response, args=(user_input,), daemon=True).start()
@@ -1523,53 +1636,46 @@ Keyboard Shortcuts:
         try:
             # Set up status callback for real-time updates during RAG processing
             def status_callback(status):
-                self.root.after(0, lambda s=status: self.update_loading_text(s))
+                # Use status bar AND loading bubble
+                self.root.after(0, lambda s=status: self.update_status(s))
+                self.update_loading_text(status)
             set_status_callback(status_callback)
             
             if self.link_mode:
                 # Link mode: Show clickable links
                 links = retrieve_and_display_links(query)
-                self.root.after(0, self.hide_loading)
+                self.hide_loading()
                 self.root.after(0, lambda: self.append_links(query, links))
             else:
                 # Response mode: Full AI response
                 messages = build_messages(self.system_prompt, self.history)
                 
                 # Update to show we're about to generate
-                self.root.after(0, lambda: self.update_loading_text("Generating response"))
+                self.root.after(0, lambda: self.update_status("Generating response..."))
                 
-                self.chat_display.insert(self.tk.END, "\n")
+                # Use transition for seamless look
+                insert_mark = self.transition_loading_to_response()
                 
                 ai_tag_name = f"ai_message_{id(self)}"
-                self._configure_message_tag(ai_tag_name, "ai")
-                
-                self.chat_display.insert(self.tk.END, "AI: ", ai_tag_name)
-                start_pos = self.chat_display.index(self.tk.END + "-1c")
-                
-                # Hide loading before streaming starts
-                self.root.after(0, self.hide_loading)
                 
                 if self.streaming_enabled:
                     accumulated: List[str] = []
                     for chunk in stream_chat(self.model, messages):
                         accumulated.append(chunk)
-                        self.chat_display.insert(self.tk.END, chunk, ai_tag_name)
+                        self.chat_display.insert(insert_mark, chunk, ai_tag_name)
                         self.chat_display.see(self.tk.END)
                         self.root.update_idletasks()
                     
                     assistant_reply = "".join(accumulated)
                 else:
                     assistant_reply = full_chat(self.model, messages)
-                    self.chat_display.insert(self.tk.END, assistant_reply, ai_tag_name)
+                    self.chat_display.insert(insert_mark, assistant_reply, ai_tag_name)
                 
-                # Add padding and final newline
-                padding = "    "
-                self.chat_display.insert(self.tk.END, padding)
-                ai_message_end_with_padding = self.chat_display.index(self.tk.END + "-1c")
+                # Padding is already present from the bubble, but let's ensure it's correct
+                # We reused the bubble structure which ends with padding + \n\n
+                # So we don't need to add it again unless we were in fallback mode.
                 
-                self.chat_display.tag_add(ai_tag_name, start_pos, ai_message_end_with_padding)
-                
-                self.chat_display.insert(self.tk.END, "\n\n")
+                self.chat_display.see(self.tk.END)
                 self.chat_display.see(self.tk.END)
                 
                 if assistant_reply:
@@ -1578,13 +1684,13 @@ Keyboard Shortcuts:
             self.update_status("Ready")
         
         except RuntimeError as err:
-            self.root.after(0, self.hide_loading)
+            self.hide_loading()
             self.update_status(f"Error: {err}")
             if self.history and self.history[-1].role == "user":
                 self.history.pop()
             self.append_message("system", f"[error] {err}")
         except Exception as e:
-            self.root.after(0, self.hide_loading)
+            self.hide_loading()
             self.messagebox.showerror("Error", f"Failed to get response: {e}")
     
     def show_api_config_dialog(self):
@@ -1667,11 +1773,11 @@ Keyboard Shortcuts:
                     max_tokens=5
                 )
                 if resp:
-                    status_label.config(text="✓ Connection Successful!", foreground="green")
+                    status_label.config(text="Connection Successful!", foreground="green")
                 else:
-                    status_label.config(text="✗ Empty Response", foreground="red")
+                    status_label.config(text="Empty Response", foreground="red")
             except Exception as e:
-                status_label.config(text=f"✗ Error: {str(e)}", foreground="red")
+                status_label.config(text=f"Error: {str(e)}", foreground="red")
         
         self.ttk.Button(main_frame, text="Test Connection", command=test_connection).pack(pady=10)
         
@@ -1772,7 +1878,7 @@ Keyboard Shortcuts:
         except ImportError:
             root = tk.Tk()
         
-        root.title("🔨 Hermit Forge")
+        root.title("Hermit Forge")
         root.geometry("550x450")
         
         # Position near main app
@@ -1816,7 +1922,7 @@ Keyboard Shortcuts:
         
         def update_count():
             if files_list:
-                count_label.config(text=f"✓ {len(files_list)} files ready")
+                count_label.config(text=f"{len(files_list)} files ready")
                 status_label.config(text="Drop more or click Accept")
             else:
                 count_label.config(text="")
@@ -1930,7 +2036,7 @@ Keyboard Shortcuts:
         
         if dnd_available:
             log_text.config(state=tk.NORMAL)
-            log_text.insert(tk.END, "✓ Drag-drop ready! Drop files anywhere.\n")
+            log_text.insert(tk.END, "Drag-drop ready! Drop files anywhere.\n")
             log_text.config(state=tk.DISABLED)
         else:
             log_text.config(state=tk.NORMAL)

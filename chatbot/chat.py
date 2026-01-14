@@ -70,16 +70,51 @@ def stream_chat(model: str, messages: List[dict]) -> Iterable[str]:
             max_tokens=None  # Allow full generation
         )
         
-        token_count = 0
+        buffer = ""
+        in_thought_block = False
+
         for chunk in stream:
             delta = chunk.get('choices', [{}])[0].get('delta', {})
             if 'content' in delta and delta['content'] is not None:
-                content = str(delta['content'])  # Ensure it's a string
-                if content:  # Only yield non-empty strings
-                    token_count += 1
-                    yield content
-                
-        debug_print(f"Stream complete. Total tokens: {token_count}")
+                content = str(delta['content'])
+                buffer += content
+
+                while True:
+                    if in_thought_block:
+                        end_tag = "</thought>"
+                        if end_tag in buffer:
+                            _, after = buffer.split(end_tag, 1)
+                            buffer = after
+                            in_thought_block = False
+                        else:
+                            break
+                    else:
+                        start_tag = "<thought>"
+                        if start_tag in buffer:
+                            before, after = buffer.split(start_tag, 1)
+                            if before:
+                                yield before
+                            buffer = after
+                            in_thought_block = True
+                        else:
+                            # Optimization: only check potential start tag
+                            if "<" in buffer:
+                                safe_len = buffer.find("<")
+                                if safe_len > 0:
+                                    yield buffer[:safe_len]
+                                    buffer = buffer[safe_len:]
+                                break
+                            else:
+                                if buffer:
+                                    yield buffer
+                                    buffer = ""
+                                break
+        
+        # Yield remaining buffer if not in thought block
+        if buffer and not in_thought_block:
+            yield buffer
+            
+        debug_print(f"Stream complete.")
             
     except Exception as e:
         debug_print(f"Local inference error: {e}")
@@ -148,14 +183,18 @@ def retrieve_and_display_links(query: str) -> List[dict]:
         debug_print("No RAG system available")
         return []
     
+    
     try:
         # Retrieve relevant documents
+        _update_status("Searching knowledge base...")
         results = rag.retrieve(query, top_k=8)
         debug_print(f"RAG retrieved {len(results)} results")
         
         if not results:
+            _update_status("No results found")
             return []
         
+        _update_status("Formatting results...")
         # Convert to link format
         links = []
         seen_titles = set()
@@ -266,7 +305,7 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                 # If Joint 4 determined the sources are irrelevant, add disclaimer but still let model answer
                 if facts_list and any("[SYSTEM ALERT" in str(fact) for fact in facts_list):
                     debug_print("SOFT BLOCK: Premise verification failed - adding disclaimer")
-                    context_text += "\n\n⚠️ IMPORTANT DISCLAIMER ⚠️\n"
+                    context_text += "\n\nIMPORTANT DISCLAIMER \n"
                     context_text += "The retrieved sources do NOT contain relevant information for this query.\n"
                     context_text += "You may answer using your general knowledge, but clearly state at the START:\n"
                     context_text += "'Note: I could not find sources for this in my knowledge base. The following is based on general knowledge and may contain inaccuracies.'\n"
