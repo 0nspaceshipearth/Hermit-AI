@@ -287,7 +287,7 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
             
             if results:
                 debug_print("Processing RAG results...")
-                context_text = "\n\nRelevant Context via RAG:\n"
+                context_text = "\n\n=== REFERENCE INFORMATION ===\n"
                 total_context_chars = 0
                 max_context_chars = 16000 # ~4000 tokens, leaving plenty for generation
                 
@@ -377,7 +377,8 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                    f"5. SYNTHESIZE: Combine the context with your knowledge to provide a complete, accurate answer.\n" \
                    f"6. ANSWER THE QUESTION DIRECTLY: If asked 'where was X born?', answer with a LOCATION. If asked 'when?', answer with a DATE. Do not provide tangential information.\n" \
                    f"7. FOR COMPARISONS: You MUST discuss BOTH entities being compared, not just one.\n" \
-                   f"8. BE HELPFUL: If the context is partial or the match is not perfect, try to infer the answer or use related information to help the user instead of simply refusing."
+                   f"8. BE HELPFUL: If the context is partial or the match is not perfect, try to infer the answer or use related information to help the user instead of simply refusing.\n" \
+                   f"9. NATURAL TONE: You are an expert. Do NOT mention 'RAG', 'context', 'retrieved documents', or 'knowledge base' in your final answer. Integrate the information naturally as if you already knew it."
 
     # [FIX] Answer Reinforcement for Multi-hop Queries
     if results:
@@ -392,7 +393,7 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
     debug_print(f"Base system_prompt + intent instruction + instructions = {len(final_system_prompt)} chars")
     
     if context_text:
-        final_system_prompt += "\n\n=== RETRIEVED CONTEXT ===\n" + context_text
+        final_system_prompt += "\n\n" + context_text
         debug_print(f"Added context. Final system_prompt = {len(final_system_prompt)} chars")
     else:
         debug_print("No context to add")

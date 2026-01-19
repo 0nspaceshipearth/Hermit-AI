@@ -150,8 +150,12 @@ class RAGSystem:
             return [query.replace(" ", "_"), query.title().replace(" ", "_")]
         
         system_msg = (
-            "You are a Wikipedia title generator. Given a user question, output 3-6 exact Wikipedia article titles "
-            "that would contain the answer. Use underscores instead of spaces. Output one title per line, nothing else."
+            "You are a Wikipedia title generator. Given a user question, output 8-10 Wikipedia article titles "
+            "that would contain the answer. Follow these rules:\n"
+            "1. Output exact titles using snake_case (e.g. 'United_States_declaraton').\n"
+            "2. If the term is ambiguous, ALWAYS include the '(disambiguation)' page.\n"
+            "3. If the query is technical (e.g. Linux, Kernel, CPU), include specific technical article titles (e.g. 'Linux_kernel', 'Process_management').\n"
+            "4. Output one title per line, nothing else."
         )
         user_msg = f"Question: {query}"
         
@@ -161,8 +165,8 @@ class RAGSystem:
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg}
                 ],
-                max_tokens=120,
-                temperature=0.0  # Deterministic
+                max_tokens=200,
+                temperature=0.3  # Slightly creative to get variations
             )
             raw_content = response['choices'][0]['message']['content']
             
@@ -172,12 +176,13 @@ class RAGSystem:
             for line in raw_content.split('\n'):
                 # Remove common prefixes: "1.", "- ", "* ", "*   ", etc.
                 t = re.sub(r'^[\d\.\-\*\s]+', '', line).strip()
-                # Remove trailing parenthetical explanations
-                t = re.sub(r'\s*\([^)]*\)\s*$', '', t).strip()
                 # Remove quotes and leading/trailing underscores
                 t = t.strip('"').strip("'").strip('_')
                 # Skip garbage (starts with punctuation, too short, etc.)
                 if not t or len(t) < 3 or t.startswith('(') or t.startswith('['):
+                    continue
+                # Skip question-like titles (Who_is, What_is, etc.)
+                if t.lower().startswith(('who_', 'what_', 'how_', 'why_', 'where_', 'when_')):
                     continue
                 # Accept valid-looking titles
                 if ' ' not in t and len(t) < 100:
@@ -194,11 +199,53 @@ class RAGSystem:
                     # Try first word alone
                     prefix_candidates.append(parts[0])
             
+            # HEURISTIC ENTITY EXTRACTION FROM QUERY (Fallback for weak LLM title gen)
+            # Extract proper nouns / capitalized phrases from query
+            import string
+            clean_q = query.strip(string.punctuation)
+            words = clean_q.split()
+            cap_phrases = []
+            current_phrase = []
+            
+            for w in words:
+                if w[0].isupper() and w.lower() not in ['who', 'what', 'where', 'when', 'why', 'how', 'is', 'are', 'the', 'a', 'an']:
+                    current_phrase.append(w)
+                else:
+                    if current_phrase:
+                        cap_phrases.append("_".join(current_phrase))
+                        current_phrase = []
+            if current_phrase:
+                cap_phrases.append("_".join(current_phrase))
+            
             # Add heuristic fallbacks
             heuristic = [
                 query.replace(" ", "_"),
                 query.title().replace(" ", "_"),
-            ]
+            ] + cap_phrases
+
+            # Domain-Specific Expansion (Heuristic Suffixes)
+            # Use QUERY terms for expansion to catch things the LLM might miss
+            q_lower = query.lower()
+            if any(k in q_lower for k in ['linux', 'kernel', 'os', 'operating system', 'cpu', 'memory']):
+                # Extract potential tech keywords from query (words > 4 chars)
+                import string
+                clean_query = query.translate(str.maketrans('', '', string.punctuation))
+                query_words = [w for w in clean_query.split() if len(w) > 4 and w.lower() not in ['what', 'where', 'when', 'which', 'about', 'between']]
+                
+                # Also consider base terms from LLM titles
+                base_terms = set(query_words)
+                for t in titles:
+                    if len(t.split('_')) == 1:
+                        base_terms.add(t)
+
+                for base in base_terms:
+                    # Title-case the base for Wikipedia compatibility
+                    base_cap = base.capitalize()
+                    
+                    heuristic.append(f"{base_cap}_kernel")
+                    heuristic.append(f"{base_cap}_architecture")
+                    heuristic.append(f"{base_cap}_system")
+                    heuristic.append(f"{base_cap}_(operating_system)")
             
             # Combine: LLM titles first, then prefixes, then heuristics
             all_candidates = titles + prefix_candidates + heuristic
