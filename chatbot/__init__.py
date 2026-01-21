@@ -23,8 +23,9 @@ import sys
 from chatbot.gui import ChatbotGUI
 from chatbot.models import Message, ModelPlatform
 from chatbot.config import DEFAULT_MODEL
+from chatbot.state import HermitContext
 
-__all__ = ['ChatbotGUI', 'Message', 'ModelPlatform']
+__all__ = ['ChatbotGUI', 'Message', 'ModelPlatform', 'HermitContext']
 
 
 def main():

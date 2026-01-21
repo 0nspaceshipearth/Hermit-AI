@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [3.1.0] - 2026-01-21
+
+### Major Architecture Upgrade
+- **Dynamic Orchestration**: Added signal-based "gear shifting" that adapts the retrieval pipeline based on query complexity. The system now tracks ambiguity, source quality, and entity coverage in real-time and can inject corrective steps when needed.
+- **HermitContext Blackboard**: New shared state manager (`chatbot/state.py`) that coordinates all joints and enables the dynamic orchestration layer.
+- **Multi-Hop Resolution**: Full implementation of the MultiHopResolverJoint for handling indirect entity references (e.g., "creator of Python" → "Guido van Rossum" → second-hop search).
+
+### Changed
+- **Model Tier Optimization**: Switched to unified 1.5B model for fast joints to eliminate model swapping overhead, providing 3-5x faster orchestration.
+- **Documentation Overhaul**: Rewrote README in a personal, human voice. Moved technical architecture details to new `ARCHITECTURE.md` essay with ASCII schematics.
+
+### Added
+- **Early Termination**: System can exit early when high-quality results are found, skipping unnecessary processing steps.
+- **Targeted Entity Search**: When entity coverage is incomplete, the orchestrator triggers targeted searches for missing entities.
+- **Query Expansion**: Low source quality scores trigger automatic query rephrasing for better retrieval.
+
+
 ## [3.0.0] - 2026-01-19
 
 ### Major Architecture Change

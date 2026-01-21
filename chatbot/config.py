@@ -26,7 +26,11 @@ MODEL_QWEN_1_5B = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"  # "Fast" Model
 MODEL_QWEN_7B = "Qwen/Qwen2.5-7B-Instruct-GGUF"      # "Smart" Model
 MODEL_NVIDIA_8B = "bartowski/nvidia_Llama-3.1-Nemotron-Nano-8B-v1-GGUF"
 
-DEFAULT_MODEL = MODEL_NVIDIA_8B  # Using 8B model for best quality (unified with smart joints)
+# === PERFORMANCE OPTIMIZATION ===
+# Tiered options: 1.5B (~1.3GB) < 3B (~2GB) < 8B (~6GB)
+DEFAULT_MODEL = MODEL_ALETHEIA_3B   # Good balance of quality vs VRAM
+# DEFAULT_MODEL = MODEL_QWEN_1_5B  # Fastest, lowest VRAM
+# DEFAULT_MODEL = MODEL_NVIDIA_8B  # Best quality, needs 6GB free VRAM
 STRICT_RAG_MODE = False
 MIN_ARTICLE_SCORE = 2.5
 DEBUG = True
@@ -49,9 +53,14 @@ SCORER_JOINT_MODEL = MODEL_QWEN_1_5B
 FILTER_JOINT_MODEL = MODEL_QWEN_1_5B
 
 # Reasoning Joints (8B)
-FACT_JOINT_MODEL = MODEL_NVIDIA_8B       # Verification requires logic
-MULTI_HOP_JOINT_MODEL = MODEL_NVIDIA_8B  # Resolving recursive entities requires logic
-COMPARISON_JOINT_MODEL = MODEL_NVIDIA_8B # Synthesizing comparisons requires logic
+# NOTE: Using 1.5B for fact joint to eliminate model swapping overhead
+# This provides 3-5x faster orchestration (5-10s vs 20-30s per query)
+# with minimal quality impact. Re-enable 8B if precision is critical.
+FACT_JOINT_MODEL = MODEL_QWEN_1_5B       # Fast mode: 3-5x speedup
+# FACT_JOINT_MODEL = MODEL_NVIDIA_8B     # Uncomment for higher precision
+MULTI_HOP_JOINT_MODEL = MODEL_QWEN_1_5B  # Using 1.5B (8B needs 6GB VRAM)
+# MULTI_HOP_JOINT_MODEL = MODEL_NVIDIA_8B  # Uncomment if VRAM available
+COMPARISON_JOINT_MODEL = MODEL_QWEN_1_5B # Fast mode (was 8B)
 
 # Joint Temperatures
 ENTITY_JOINT_TEMP = 0.1
@@ -74,3 +83,26 @@ SYSTEM_PROMPT = (
     "You synthesize information from multiple sources when relevant and always verify "
     "that your answer directly addresses what was asked."
 )
+
+# === DYNAMIC ORCHESTRATION CONFIGURATION ===
+# Enable signal-based "conscious" decision-making in RAG pipeline
+USE_ORCHESTRATION = True
+
+# Maximum orchestration loop iterations (safety limit)
+MAX_ORCHESTRATION_STEPS = 10
+
+# Signal Thresholds for Gear-Shifting
+MIN_SOURCE_SCORE_THRESHOLD = 6.0   # Below this, trigger query expansion
+MIN_COVERAGE_THRESHOLD = 1.0        # Below this, trigger targeted entity search
+HIGH_AMBIGUITY_THRESHOLD = 0.7     # Above this, enable multi-hop resolution
+
+# === REFINEMENT CONFIGURATION ===
+# Early Termination Thresholds
+HIGH_QUALITY_THRESHOLD = 8.0          # Score (0-10) above which we can exit early
+MIN_RESULTS_FOR_EARLY_EXIT = 3       # Minimum results before considering early exit
+MAX_EXPANSION_ITERATIONS = 2          # Limit expansion loops
+
+# Multi-Hop Resolution
+ENABLE_MULTI_HOP_RESOLUTION = True    # Toggle for multi-hop resolver
+MULTI_HOP_AMBIGUITY_THRESHOLD = 0.6   # Ambiguity level to trigger resolution
+

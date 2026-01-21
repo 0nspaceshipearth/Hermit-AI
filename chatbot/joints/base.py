@@ -71,26 +71,26 @@ def extract_json_from_text(text: str) -> Optional[Any]:
 def local_inference(model: str, prompt: str, temperature: float = 0.0, timeout: int = 5, use_json_grammar: bool = False):
     """
     Run local inference using ModelManager.
+    Uses chat completion to avoid KV cache contamination.
     """
-    # Use a reasonable context size for joints
-    n_ctx = 2048
+    # Use larger context size for joints to handle retrieved content
+    n_ctx = 4096  # Increased from 2048 to prevent overflow
     try:
         llm = ModelManager.get_model(model, n_ctx=n_ctx)
         
-        completion_kwargs = {
-            "prompt": prompt,
-            "max_tokens": 512,
-            "temperature": temperature,
-            "stop": ["}]", "互"]  # Added safety stops
-        }
+        # Use chat completion to avoid KV cache issues
+        messages = [
+            {"role": "system", "content": "You are a precise JSON extraction system. Output only valid JSON."},
+            {"role": "user", "content": prompt}
+        ]
         
-        if use_json_grammar:
-             # If llama-cpp-python version supports it, we could use grammar here.
-             # For now, we rely on the prompt and robust extraction.
-             pass
-
-        response = llm.create_completion(**completion_kwargs)
-        return response['choices'][0]['text']
+        response = llm.create_chat_completion(
+            messages=messages,
+            max_tokens=512,
+            temperature=temperature
+        )
+        return response['choices'][0]['message']['content']
     except Exception as e:
         debug_print("BASE:INFERENCE", f"Inference failed: {e}")
         raise e
+

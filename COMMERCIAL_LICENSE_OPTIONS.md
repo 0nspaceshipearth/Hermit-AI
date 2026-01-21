@@ -1,31 +1,26 @@
-# Commercial Licensing Options
+# commercial licensing
 
-Hermit is open-source software available under the **GNU Affero General Public License v3.0 (AGPL v3)**. 
+hermit is open source under agpl v3. for most people, that's all you need.
 
-For most researchers, hobbyists, and open-source developers, the AGPL v3 is perfect. However, certain government, enterprise, or embedded use cases may require a commercial license.
+but if you're in government, enterprise, or building a proprietary product, you might need a commercial license. here's the difference:
 
-## License Comparison
+**agpl v3 (free)**
+- you have to share your source code if you deploy hermit on a network
+- modifications must be open sourced
+- community support only
 
-| Feature | Open Source (AGPL v3) | Commercial License |
-|---------|-----------------------|--------------------|
-| **Cost** | Free | Paid |
-| **Source Disclosure** | **Required** (Network Clause applies) | **Not Required** |
-| **Modifications** | Must be open-sourced if deployed | Can remain proprietary |
-| **Distribution** | Must share source code | Can distribute binary-only |
-| **Support** | Community Support | Dedicated/Priority Support |
-| **Indemnification** | None | Available |
+**commercial license (paid)**
+- keep your code proprietary
+- no source disclosure required
+- priority support available
 
-## Why Purchase a Commercial License?
+## when you need this
 
-1. **Classified / Secure Deployments**: If you are deploying Hermit in a secure, air-gapped, or classified environment where releasing source code modifications is impossible or prohibited, the Commercial License grants you an exemption from the AGPL's source disclosure requirements.
-   
-2. **Proprietary Integration**: If you wish to embed Hermit's technology into a proprietary product without "infecting" your entire stack with the copyleft provisions, a Commercial License provides the legal separation you need.
+- classified or air-gapped deployments where you can't release source
+- embedding hermit into proprietary products
+- legal/procurement requirements for large organizations
 
-3. **Legal Certainty**: Commercial licenses come with assurances and direct contractual relationships with Hermit-AI, Inc., simplifying procurement and compliance for large organizations.
+## contact
 
-## Contact Us
-
-For commercial inquiries, custom development, or licensing questions, please contact:
-
-**Hermit-AI, Inc.**  
-Email: 0nspaceshipearth@proton.me
+**hermit-ai, inc.**  
+0nspaceshipearth@proton.me
