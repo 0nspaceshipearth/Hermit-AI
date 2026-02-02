@@ -204,6 +204,10 @@ class ModelManager:
                                  match_found = True
                                  candidate_file = candidate
                                  break
+                        elif "pioneer" in repo_id.lower() and "pioneer" in candidate.lower():
+                             match_found = True
+                             candidate_file = candidate
+                             break
                              
                     if match_found and candidate_file:
                         # [FIX] Verify all shards if it's a split file
@@ -237,7 +241,7 @@ class ModelManager:
         # List files in repo (to find best quantization)
         try:
             # Note: Don't notify "checking" here - it causes dialog flash for cached models
-            files = list_repo_files(repo_id)
+            files = list_repo_files(repo_id, token=config.HF_TOKEN)
             gguf_files = [f for f in files if f.endswith('.gguf')]
             
             if not gguf_files:
@@ -297,7 +301,8 @@ class ModelManager:
                     path = hf_hub_download(
                         repo_id=repo_id,
                         filename=shard_name,
-                        local_dir=model_dir
+                        local_dir=model_dir,
+                        token=config.HF_TOKEN
                     )
                     if i == 1:
                         final_path = path
@@ -309,7 +314,8 @@ class ModelManager:
                 path = hf_hub_download(
                     repo_id=repo_id, 
                     filename=selected_file, 
-                    local_dir=model_dir
+                    local_dir=model_dir,
+                    token=config.HF_TOKEN
                 )
                 
                 _notify_progress("ready", 1.0, size_str)

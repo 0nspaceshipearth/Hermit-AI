@@ -40,6 +40,13 @@ if __name__ == "__main__":
         config.DEFAULT_MODEL    # Main Chat Model (Qwen 3B)
     ]
 
+    # Add Pioneer model if enabled (requires HF_TOKEN)
+    if getattr(config, 'USE_PIONEER_JOINT', False):
+        models_to_download.append(config.MODEL_PIONEER)
+        if not config.HF_TOKEN:
+            print("\n[!] WARNING: Pioneer Joint is enabled but HF_TOKEN is not set.")
+            print("    Accessing private models requires a Hugging Face token.")
+
     # De-duplicate
     models_to_download = list(set(models_to_download))
 

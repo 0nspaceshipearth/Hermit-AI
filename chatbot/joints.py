@@ -11,6 +11,11 @@ from chatbot.joints.fact_refinement import FactRefinementJoint
 from chatbot.joints.comparison import ComparisonJoint
 from chatbot.joints.multi_hop_resolver import MultiHopResolverJoint
 
+try:
+    from pioneer_sdk.pioneer_joint import PioneerJoint
+except ImportError:
+    PioneerJoint = None
+
 __all__ = [
     'debug_print',
     'extract_json_from_text',
@@ -21,5 +26,6 @@ __all__ = [
     'ChunkFilterJoint',
     'FactRefinementJoint',
     'ComparisonJoint',
-    'MultiHopResolverJoint'
+    'MultiHopResolverJoint',
+    'PioneerJoint'
 ]
