@@ -8,3 +8,5 @@ data/index/
 .DS_Store
 .github_deploy_key
 .github_deploy_key.pub
+test_data.csv
+test_pioneer_integration.py

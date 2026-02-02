@@ -32,6 +32,118 @@ class IntentResult:
     system_instruction: str
     mode_name: str
 
+
+@dataclass
+class QueryComplexity:
+    """Classification of query complexity for pipeline optimization."""
+    level: str  # "simple", "moderate", "complex"
+    skip_multi_hop: bool  # Skip multi-hop resolver
+    skip_coverage: bool   # Skip coverage verifier
+    max_steps: int        # Reduced orchestration steps for simple queries
+
+
+def classify_query_complexity(query: str) -> QueryComplexity:
+    """
+    Heuristic classifier to determine query complexity.
+    Simple queries can skip expensive joints to reduce latency.
+
+    Returns:
+        QueryComplexity with routing hints for the orchestrator
+    """
+    debug_print(f"Classifying complexity for: '{query}'")
+    q_lower = query.lower().strip()
+
+    # Count entities (capitalized words, quoted strings)
+    entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query)
+    quoted = re.findall(r'"[^"]*"', query)
+    entity_count = len(entities) + len(quoted)
+
+    # Word count
+    words = q_lower.split()
+    word_count = len(words)
+
+    # SIMPLE: "What is X?" patterns, single entity queries
+    simple_patterns = [
+        r'^what is\b',
+        r'^what are\b',
+        r'^who is\b',
+        r'^who was\b',
+        r'^define\b',
+        r'^meaning of\b',
+        r'^when was\b.*born',
+        r'^when did\b.*die',
+    ]
+
+    for pattern in simple_patterns:
+        if re.search(pattern, q_lower):
+            if entity_count <= 1 and word_count <= 8:
+                debug_print(f"SIMPLE query (pattern match + short)")
+                return QueryComplexity(
+                    level="simple",
+                    skip_multi_hop=True,
+                    skip_coverage=True,
+                    max_steps=5
+                )
+
+    # COMPLEX: Comparisons, multi-entity, long queries
+    complex_indicators = [
+        r'\bcompare\b',
+        r'\bversus\b',
+        r'\bvs\.?\b',
+        r'\bdifference between\b',
+        r'\brelationship between\b',
+        r'\bhow does .* affect\b',
+        r'\bwhy did .* cause\b',
+    ]
+
+    for pattern in complex_indicators:
+        if re.search(pattern, q_lower):
+            debug_print(f"COMPLEX query (comparison/relationship pattern)")
+            return QueryComplexity(
+                level="complex",
+                skip_multi_hop=False,
+                skip_coverage=False,
+                max_steps=10
+            )
+
+    # Multiple entities = moderate to complex
+    if entity_count >= 3:
+        debug_print(f"COMPLEX query ({entity_count} entities)")
+        return QueryComplexity(
+            level="complex",
+            skip_multi_hop=False,
+            skip_coverage=False,
+            max_steps=10
+        )
+
+    if entity_count == 2:
+        debug_print(f"MODERATE query (2 entities)")
+        return QueryComplexity(
+            level="moderate",
+            skip_multi_hop=False,
+            skip_coverage=True,  # Skip coverage for moderate
+            max_steps=7
+        )
+
+    # Long queries are often more complex
+    if word_count > 15:
+        debug_print(f"MODERATE query (long: {word_count} words)")
+        return QueryComplexity(
+            level="moderate",
+            skip_multi_hop=False,
+            skip_coverage=True,
+            max_steps=7
+        )
+
+    # Default: simple
+    debug_print(f"SIMPLE query (default)")
+    return QueryComplexity(
+        level="simple",
+        skip_multi_hop=True,
+        skip_coverage=True,
+        max_steps=5
+    )
+
 def detect_intent(query: str) -> IntentResult:
     """
     Analyze the user query to determine intent and operational mode.

@@ -16,6 +16,7 @@ llama-cpp-python
 numpy
 tqdm
 requests
+pandas  # Optional: For data file processing
 
 # GUI
 tkinterdnd2

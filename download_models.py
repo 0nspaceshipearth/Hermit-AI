@@ -34,6 +34,7 @@ if __name__ == "__main__":
     # 2. Download LLM GGUFs
     # Identify models from config
     models_to_download = [
+        config.MODEL_QWEN_0_5B, # Tiny Title Generation Model (0.5B)
         config.MODEL_QWEN_1_5B, # Fast Joint Model
         config.MODEL_NVIDIA_8B, # Smart/Reasoning Model (Nvidia 8B)
         config.DEFAULT_MODEL    # Main Chat Model (Qwen 3B)

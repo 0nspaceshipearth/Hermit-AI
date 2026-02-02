@@ -21,20 +21,31 @@
 
 OLLAMA_CHAT_URL = "N/A" # Legacy/Deprecated
 # Local Model Repositories
-MODEL_QWEN_3B = "Qwen/Qwen2.5-3B-Instruct-GGUF" 
+MODEL_QWEN_3B = "Qwen/Qwen2.5-3B-Instruct-GGUF"
 MODEL_QWEN_1_5B = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"  # "Fast" Model
 MODEL_QWEN_7B = "Qwen/Qwen2.5-7B-Instruct-GGUF"      # "Smart" Model
-MODEL_QWEN_32B = "Qwen2.5-Coder-32B-Instruct-abliterated-Q5_K_M.gguf" # "Genius" Model (Requires 2x GPUs)
 MODEL_NVIDIA_8B = "bartowski/nvidia_Llama-3.1-Nemotron-Nano-8B-v1-GGUF"
 
 # === PERFORMANCE OPTIMIZATION ===
 # Tiered options: 1.5B (~1.3GB) < 3B (~2GB) < 8B (~6GB)
-DEFAULT_MODEL = MODEL_QWEN_3B   # Good balance of quality vs VRAM
+DEFAULT_MODEL = MODEL_QWEN_3B   # Default for public release
 # DEFAULT_MODEL = MODEL_QWEN_1_5B  # Fastest, lowest VRAM
 # DEFAULT_MODEL = MODEL_NVIDIA_8B  # Best quality, needs 6GB free VRAM
 STRICT_RAG_MODE = False
 MIN_ARTICLE_SCORE = 2.5
 DEBUG = True
+
+# === TITLE GENERATION OPTIMIZATION ===
+# Tiny model for fast title generation (0.5B-1.5B recommended)
+# This avoids loading the 14B model just to guess Wikipedia titles
+MODEL_QWEN_0_5B = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"  # Tiny model for title gen
+TITLE_GEN_MODEL = MODEL_QWEN_0_5B  # Fast title generation (~1-3s -> ~0.3s)
+# TITLE_GEN_MODEL = MODEL_QWEN_1_5B  # Alternative: slightly smarter
+TITLE_CACHE_SIZE = 1000  # LRU cache entries for title generation
+
+# === ZIM ARCHIVE POOLING ===
+# Limit concurrent open ZIM handles to reduce file descriptor usage
+ZIM_POOL_MAX_SIZE = 5  # Maximum concurrent open ZIM archives
 
 # API / External Model Configuration
 API_MODE = False  # If True, use external API instead of local GGUF
@@ -44,6 +55,7 @@ API_MODEL_NAME = "local-model"  # Passed in API request
 
 # Multi-Joint RAG System Configuration
 USE_JOINTS = True
+
 
 # === TIERED MODEL ARCHITECTURE ===
 # Fast Models (1.5B) for high-volume, low-complexity tasks

@@ -41,7 +41,7 @@ class HermitContext:
     # Dynamic Planning Queue
     current_plan: List[str] = field(default_factory=lambda: [
         "extract",
-        "search", 
+        "search",
         "score",
         "verify"
     ])

@@ -220,10 +220,16 @@ class ChatbotGUI:
         self.root = self.tk.Tk()
         self.root.title(f"Hermit - {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
         self.root.geometry("900x700")
-        
+        self.root.minsize(400, 300)  # Minimum window size to keep input visible
+
+        # Main container using grid for better resize behavior
+        self.root.grid_rowconfigure(0, weight=1)  # Chat area expands
+        self.root.grid_rowconfigure(1, weight=0)  # Input area fixed height
+        self.root.grid_columnconfigure(0, weight=1)
+
         # Chat display
         chat_frame = self.ttk.Frame(self.root)
-        chat_frame.pack(fill=self.tk.BOTH, expand=True, padx=15, pady=(15, 5))
+        chat_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=(15, 5))
         
         self.scrollbar = self.ttk.Scrollbar(chat_frame, orient=self.tk.VERTICAL)
         self.scrollbar.pack(side=self.tk.RIGHT, fill=self.tk.Y)
@@ -252,13 +258,14 @@ class ChatbotGUI:
             "leave": lambda e: self.chat_display.config(cursor="")
         }
         
-        # Input area
+        # Input area - fixed at bottom, never collapses
         input_container = self.ttk.Frame(self.root)
-        input_container.pack(fill=self.tk.X, pady=(5, 10))
-        
+        input_container.grid(row=1, column=0, sticky="ew", padx=15, pady=(5, 10))
+        input_container.grid_columnconfigure(0, weight=1)  # Center the input frame
+
         input_frame = self.ttk.Frame(input_container)
-        input_frame.pack(anchor=self.tk.CENTER)
-        
+        input_frame.grid(row=0, column=0)
+
         self.input_entry = self.tk.Entry(
             input_frame, font=("Arial", 12),
             relief=self.tk.FLAT, borderwidth=0,
@@ -330,8 +337,12 @@ class ChatbotGUI:
         self.loading_pulse_step = 0
         self.loading_pulse_direction = 1  # 1 = brightening, -1 = dimming
         
-        # Download progress dialog
-        self.download_dialog: Optional[DownloadProgressDialog] = None
+        # Download progress - now uses chat bubble instead of modal dialog
+        self.download_dialog: Optional[DownloadProgressDialog] = None  # Legacy, kept for compatibility
+        self._download_bubble_tag: Optional[str] = None  # Tag for current download bubble
+        self._download_bubble_start: Optional[str] = None  # Start index of bubble
+        self._download_bubble_end: Optional[str] = None  # End index of bubble
+        self._download_dismiss_job: Optional[str] = None  # After job ID for auto-dismiss
         self._setup_download_callback()
         
         self.apply_theme()
@@ -350,36 +361,119 @@ class ChatbotGUI:
         set_download_callback(on_progress)
     
     def _handle_download_progress(self, status: str, progress: float, detail: str):
-        """Handle download progress updates (called on main thread)."""
-        # ONLY show dialog for actual downloading (network).
-        # "loading" (disk->RAM) and "checking" happen too often and are annoying.
-        if status == "downloading":
-            # Show dialog if not already showing
-            if not self.download_dialog:
-                self.download_dialog = DownloadProgressDialog(self.root, self.dark_mode)
-                self.download_dialog.show("Downloading Model...")
-            self.download_dialog.update(status, progress, detail)
-        
-        elif status == "loading" or status == "checking":
-             # Just update status bar if possible (no-op here since update_status is disabled)
-             # But definitely DO NOT show the popup dialog.
-             pass
+        """Handle download progress updates (called on main thread).
 
-            
+        Shows progress as a chat bubble instead of a modal popup.
+        """
+        # Cancel any pending auto-dismiss
+        if self._download_dismiss_job:
+            self.root.after_cancel(self._download_dismiss_job)
+            self._download_dismiss_job = None
+
+        if status == "downloading":
+            # Format progress message - clean, no emojis
+            pct = int(progress * 100) if progress >= 0 else 0
+            progress_bar = self._make_progress_bar(pct)
+            msg = f"Downloading {detail}\n{progress_bar} {pct}%"
+            self._show_download_bubble(msg)
+
+        elif status == "loading":
+            msg = f"Loading model into memory..."
+            self._show_download_bubble(msg)
+
+        elif status == "checking":
+            # Skip checking status - too brief to show
+            pass
+
         elif status == "ready":
-            # Hide dialog after a brief delay to show completion
-            if self.download_dialog:
-                self.download_dialog.update(status, 1.0, detail)
-                self.root.after(500, self._hide_download_dialog)
-                
+            msg = f"Model ready"
+            self._show_download_bubble(msg)
+            # Auto-dismiss after 3 seconds
+            self._download_dismiss_job = self.root.after(3000, self._dismiss_download_bubble)
+
         elif status == "error":
-            # Show error briefly then hide
-            if self.download_dialog:
-                self.download_dialog.update(status, -1, detail)
-                self.root.after(2000, self._hide_download_dialog)
-    
+            msg = f"Download error: {detail}"
+            self._show_download_bubble(msg)
+            # Auto-dismiss after 6 seconds (longer for errors)
+            self._download_dismiss_job = self.root.after(6000, self._dismiss_download_bubble)
+
+    def _make_progress_bar(self, percent: int, width: int = 20) -> str:
+        """Create a text-based progress bar."""
+        filled = int(width * percent / 100)
+        empty = width - filled
+        return f"[{'=' * filled}{'-' * empty}]"
+
+    def _show_download_bubble(self, message: str):
+        """Show or update the download notification bubble in chat.
+
+        Matches existing bubble style - clean, minimal, dark gray text.
+        """
+        try:
+            # Remove existing bubble if present
+            if self._download_bubble_tag and self._download_bubble_start:
+                try:
+                    self.chat_display.delete(self._download_bubble_start, self._download_bubble_end)
+                except self.tk.TclError:
+                    pass  # Indices may be invalid
+
+            # Insert new bubble
+            self.chat_display.insert(self.tk.END, "\n")
+            self._download_bubble_start = self.chat_display.index(self.tk.END + "-1c")
+
+            self.chat_display.insert(self.tk.END, message)
+
+            # Add padding
+            self.chat_display.insert(self.tk.END, "    ")
+            self._download_bubble_end = self.chat_display.index(self.tk.END)
+
+            # Style the bubble to match existing design
+            self._download_bubble_tag = f"download_bubble_{id(self)}"
+            self.chat_display.tag_add(
+                self._download_bubble_tag,
+                self._download_bubble_start,
+                self._download_bubble_end
+            )
+
+            # Match existing bubble style - same bg, darker gray text
+            if self.dark_mode:
+                bg_color = "#1E1E1E"
+                fg_color = "#808080"  # Darker gray text
+            else:
+                bg_color = "#E0E0E0"
+                fg_color = "#606060"  # Darker gray text
+
+            self.chat_display.tag_config(
+                self._download_bubble_tag,
+                background=bg_color,
+                foreground=fg_color,
+                font=("Consolas", 10),
+                lmargin1=12,
+                lmargin2=12,
+                rmargin=12,
+                spacing1=6,
+                spacing2=3,
+                spacing3=6
+            )
+
+            self.chat_display.see(self.tk.END)
+
+        except Exception as e:
+            print(f"[GUI] Download bubble error: {e}")
+
+    def _dismiss_download_bubble(self):
+        """Remove the download notification bubble from chat."""
+        self._download_dismiss_job = None
+        if self._download_bubble_tag and self._download_bubble_start:
+            try:
+                self.chat_display.delete(self._download_bubble_start, self._download_bubble_end)
+            except self.tk.TclError:
+                pass  # Already removed or invalid indices
+            self._download_bubble_tag = None
+            self._download_bubble_start = None
+            self._download_bubble_end = None
+
     def _hide_download_dialog(self):
-        """Hide the download progress dialog."""
+        """Hide the download progress dialog (legacy method)."""
         if self.download_dialog:
             self.download_dialog.hide()
             self.download_dialog = None
