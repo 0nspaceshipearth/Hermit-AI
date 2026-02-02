@@ -18,7 +18,7 @@ a synergistic architecture that utilizes models of various types and sizes to st
 
 I call it "Hermit."
 
-It is a 100% offline .zim data extraction and context injection tool for answering queries. All you need to know is that at the end of the chain (I call them "Joints"), the final model gets handed the best data it found in your collection of .zim files.
+It is a 100% offline .zim data extraction and context injection tool for answering queries. All you need to know is that at the end of the chain (I call them "Joints"), the final model gets handed the best data it found in your collection of .zim files with 100% available context.
 
 Why .zim files? Because there is a plethora of available collections containing incredibly useful information through sources like Kiwix. I personally use this in parallel with  research papers, Wikipedia, Project Gutenberg, Stack Overflow, and medical, etc... all equating to about 300gb of data for local model context injection.   
 
