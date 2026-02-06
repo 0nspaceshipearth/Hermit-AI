@@ -1,22 +1,4 @@
 
-# Hermit - Offline AI Chatbot for Wikipedia & ZIM Files
-# Copyright (C) 2026 Hermit-AI, Inc.
-#
-# SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published
-# by the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 """
 Model Manager for Local Inference.
 Handles downloading GGUF models from Hugging Face and loading them via llama-cpp-python.
@@ -142,8 +124,7 @@ class ModelManager:
         print(f"Checking model availability for: {repo_id}")
         
         # Search strategy: Q5_K_M > Q4_K_M > Q8_0 > Q4_0
-        # Search strategy: Q5_K_M > Q4_K_M > Q8_0 > Q4_0
-        preferences = ["Q5_K_M", "Q4_K_M", "Q8_0", "Q4_0"]
+        preferences = ["Q5_K_M", "Q4_K_M", "Q8_0", "Q4_0", "F16"]
         
         # 0. DIRECT FILE CHECK (Fast Path for manually downloaded models)
         # If repo_id looks like a filename (ends in .gguf) and exists, just use it.
@@ -203,12 +184,14 @@ class ModelManager:
                              if "qwen2.5-1.5b-instruct" in candidate.lower():
                                  match_found = True
                                  candidate_file = candidate
+                             if "qwen2.5-1.5b-instruct" in candidate.lower():
+                                 match_found = True
+                                 candidate_file = candidate
                                  break
                         elif "pioneer" in repo_id.lower() and "pioneer" in candidate.lower():
                              match_found = True
                              candidate_file = candidate
                              break
-                             
                     if match_found and candidate_file:
                         # [FIX] Verify all shards if it's a split file
                         import re
@@ -241,7 +224,7 @@ class ModelManager:
         # List files in repo (to find best quantization)
         try:
             # Note: Don't notify "checking" here - it causes dialog flash for cached models
-            files = list_repo_files(repo_id, token=config.HF_TOKEN)
+            files = list_repo_files(repo_id)
             gguf_files = [f for f in files if f.endswith('.gguf')]
             
             if not gguf_files:
@@ -301,8 +284,7 @@ class ModelManager:
                     path = hf_hub_download(
                         repo_id=repo_id,
                         filename=shard_name,
-                        local_dir=model_dir,
-                        token=config.HF_TOKEN
+                        local_dir=model_dir
                     )
                     if i == 1:
                         final_path = path
@@ -314,8 +296,7 @@ class ModelManager:
                 path = hf_hub_download(
                     repo_id=repo_id, 
                     filename=selected_file, 
-                    local_dir=model_dir,
-                    token=config.HF_TOKEN
+                    local_dir=model_dir
                 )
                 
                 _notify_progress("ready", 1.0, size_str)
@@ -327,17 +308,22 @@ class ModelManager:
             print(f"Error resolving model {repo_id}: {e}")
             # Final Fallback: Check if ANY file exists in model_dir
             if existing_files:
-                 print(f"Network error, falling back to local file: {existing_files[0]}")
-                 return existing_files[0]
+                print(f"Network error, falling back to local file: {existing_files[0]}")
+                return existing_files[0]
             raise
 
     @classmethod
-    def get_model(cls, repo_id: str, n_ctx: int = 8192, n_gpu_layers: int = -1) -> 'Llama':
+    def get_model(cls, repo_id: str, n_ctx: int = 8192, n_gpu_layers: int = -1, local_only: bool = False) -> 'Llama':
         """
         Get or load a Llama model instance.
         Enforces single-model policy to prevent VRAM OOM.
         Uses 8192 context by default to accommodate RAG content.
         """
+        # GLOBAL GEMINI OVERRIDE
+        if not local_only and getattr(config, 'GLOBAL_GEMINI', False) and getattr(config, 'GOOGLE_API_KEY', None):
+             # Always return Gemini if global mode is on, unless local_only is explicitly requested
+             repo_id = config.MODEL_GEMINI
+             
         if repo_id in cls._instances:
             return cls._instances[repo_id]
             
@@ -366,9 +352,6 @@ class ModelManager:
             except Exception:
                 pass  # torch might not be available
             
-        if Llama is None:
-            raise ImportError("llama-cpp-python is missing")
-        
         model_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
         print(f"Loading model: {repo_id}...")
         _notify_progress("loading", -1, f"Loading {model_name} into GPU...")
@@ -390,6 +373,40 @@ class ModelManager:
                 cls._instances[repo_id] = client
                 _notify_progress("ready", 1.0, f"API: {config.API_MODEL_NAME}")
                 return client
+
+            # GEMINI MODE CHECK
+            if repo_id == getattr(config, 'MODEL_GEMINI', 'gemini-pro'):
+                print(f"Gemini Mode Enabled.")
+                google_key = getattr(config, 'GOOGLE_API_KEY', None)
+                if not google_key:
+                    # Try loading from keyring
+                    try:
+                        from chatbot.keyring import load_google_api_key
+                        saved = load_google_api_key()
+                        if saved:
+                            config.GOOGLE_API_KEY = saved
+                            google_key = saved
+                    except ImportError:
+                        pass
+                
+                if not google_key:
+                     # Fallback to local model if key missing
+                     print("No Google API Key found. Falling back to default local model.")
+                     if repo_id == config.MODEL_GEMINI:
+                         repo_id = config.DEFAULT_MODEL
+                         # Recurse with new repo_id
+                         return cls.get_model(repo_id, n_ctx, n_gpu_layers, local_only=True)
+
+                if google_key:
+                    from chatbot.gemini_client import GeminiClientWrapper
+                    client = GeminiClientWrapper(api_key=google_key, model_name=repo_id)
+                    cls._instances[repo_id] = client
+                    _notify_progress("ready", 1.0, "Gemini Ready")
+                    return client
+
+            # Local model loading requires llama-cpp-python
+            if Llama is None:
+                raise ImportError("llama-cpp-python is missing. Cannot load local model.")
 
             model_path = cls.ensure_model_path(repo_id)
             
@@ -413,65 +430,158 @@ class ModelManager:
             except ImportError:
                 gpu_count = 0
             
+            # Default loading strategy
+            load_candidates = [{"n_gpu_layers": n_gpu_layers, "use_mmap": True}]
+
+            print(f"DEBUG: File Size: {file_size_gb:.2f}GB, GPUs: {gpu_count}")
             if file_size_gb > 16.0 and gpu_count > 1:
                 print(f"⚠️ Large model detected ({file_size_gb:.1f} GB) with {gpu_count} GPUs.")
                 print("   -> Activating Multi-GPU Tensor Split Mode (ROW SPLIT).")
                 
-                # Force context reduction if not explicit to save VRAM
-                # Context reduction removed to allow dynamic sizing as requested
-                # if n_ctx > 2048:
-                #     pass
-                
-                # Strategy D: No-mmap + Conservative Offload
-                # "ValueError" without OOM suggests mmap/loading issue or fragmentation.
-                # We disable mmap to force clean load.
-                # We use 48 layers (~75% of model) which should fit ~10.5GB per card
-                print("   -> Offloading 48/64 layers to GPUs (No MMAP).")
-                n_gpu_layers = 48
-                tensor_split = None
-                split_mode = 1 # LLAMA_SPLIT_MODE_LAYER (Default)
-                
-            llm = Llama(
-                model_path=model_path,
-                n_gpu_layers=n_gpu_layers,
-                n_ctx=n_ctx,
-                split_mode=split_mode,
-                tensor_split=tensor_split,
-                use_mmap=True, # [OPTIMIZATION] Try MMAP first for speed
-                verbose=True 
-            )
-            
-            cls._instances[repo_id] = llm
-            _notify_progress("ready", 1.0, f"{model_name} ready")
-            print(f"Model {repo_id} loaded successfully (MMAP Enabled).")
-            return llm
-
-        except Exception as e:
-            # Fallback for MMAP failures or other loading issues
-            if "mmap" in str(e).lower() or "memory" in str(e).lower():
-                print(f"⚠️ MMAP/Memory Error: {e}")
-                print("   -> Retrying with use_mmap=False (Slower, but safer)...")
+                # Robust Dynamic VRAM Strategy
+                # Calculates exact maximal layer count based on model size and VRAM
                 try:
+                    import torch
+                    
+                    if torch.cuda.is_available():
+                        # 1. Get Free VRAM
+                        # Use the minimum free memory across cards to avoid bottlenecking one
+                        min_free_vram_gb = min([torch.cuda.mem_get_info(i)[0] for i in range(gpu_count)]) / (1024**3)
+                        print(f"🔍 Dynamic Load: Avail VRAM per card: {min_free_vram_gb:.2f} GB")
+
+                        # 2. Check Model Size
+                        # If using the simplified ID, we might need to resolve it, but here we assume model_id is a path if it ends with .gguf
+                        if model_path.endswith(".gguf") and os.path.exists(model_path):
+                             model_size_gb = os.path.getsize(model_path) / (1024**3)
+                        else:
+                             # Fallback relative to hardcoded known sizes
+                             model_size_gb = 20.0 
+                        
+                        print(f"   Model Size: {model_size_gb:.2f} GB")
+
+                        # 3. Calculate Layers
+                        # Qwen 32B has roughly 64 transformer layers
+                        # We reserve VRAM for KV cache (context) and overhead
+                        # 8192 context ~ 2GB KV cache (1GB per card) + 1GB buffer = 2GB safety per card
+                        
+                        # Estimate layer count from model size
+                        # ~0.3GB per layer for 32B Q4, ~0.2GB for 14B, ~0.5GB for 70B
+                        TOTAL_LAYERS = max(32, int(model_size_gb / 0.32))
+                        LAYER_OVERHEAD = 0.5 # Extra space for output heads/norms
+                        
+                        # Size per layer (approx)
+                        gb_per_layer = model_size_gb / (TOTAL_LAYERS + LAYER_OVERHEAD)
+                        
+                        # Safety Buffer (KV Cache + Desktop Overhead)
+                        SAFETY_BUFFER_GB = 1.5 
+                        
+                        usable_vram_per_card = max(0, min_free_vram_gb - SAFETY_BUFFER_GB)
+                        total_usable_vram = usable_vram_per_card * gpu_count
+                        
+                        # Max layers fitting in usable VRAM
+                        calculated_layers = int(total_usable_vram / gb_per_layer)
+                        
+                        # Clamp
+                        calculated_layers = max(0, min(TOTAL_LAYERS, calculated_layers))
+                        
+                        print(f"   Calculated Safe Layers: {calculated_layers} (Based on {total_usable_vram:.2f}GB usable VRAM)")
+
+                        # Generate ONE optimal candidate + fallbacks
+                        load_candidates = [
+                            {"n_gpu_layers": calculated_layers, "use_mmap": False, "desc": f"Auto-Optimized ({calculated_layers} layers)"},
+                            {"n_gpu_layers": max(0, calculated_layers - 8), "use_mmap": False, "desc": f"Safe Fallback ({max(0, calculated_layers - 8)} layers)"},
+                            {"n_gpu_layers": 0, "use_mmap": True, "desc": "CPU Only", "hide_gpu": True}
+                        ]
+                    else:
+                        print("⚠️ No CUDA, falling back to CPU candidates.")
+
+                except Exception as e:
+                     import traceback
+                     traceback.print_exc()
+                     print(f"⚠️ Dynamic sizing failed: {e}. Using conservative defaults.")
+                     # Fallback to safe table
+                     load_candidates = [
+                        {"n_gpu_layers": 32, "use_mmap": False, "desc": "Fallback (32 layers)"},
+                        {"n_gpu_layers": 16, "use_mmap": False, "desc": "Fallback (16 layers)"},
+                        {"n_gpu_layers": 0,  "use_mmap": True,  "desc": "CPU Only"}
+                     ]
+            
+            # Iterative Loading Loop - Strict
+            last_error = None
+            original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+
+            for load_config in load_candidates:
+                current_layers = load_config.get("n_gpu_layers", n_gpu_layers)
+                current_mmap = load_config.get("use_mmap", True)
+                desc = load_config.get("desc", f"Standard ({current_layers} layers)")
+                hide_gpu = load_config.get("hide_gpu", False)
+                
+                print(f"🔄 Attempting load: {desc}...")
+                _notify_progress("loading", -1, f"Loading {model_name} ({desc})...")
+
+                try:
+                    # Clean up before attempt
+                    try:
+                        import gc
+                        gc.collect()
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception as cleanup_err:
+                        print(f"⚠️ Cleanup Warning: {cleanup_err}")
+
+                    # Handle GPU hiding for CPU mode
+                    if hide_gpu:
+                        print("   -> Hiding GPUs to prevent CUDA OOM...")
+                        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                    elif original_cuda_visible is not None:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                    elif "CUDA_VISIBLE_DEVICES" in os.environ:
+                        del os.environ["CUDA_VISIBLE_DEVICES"]
+
                     llm = Llama(
                         model_path=model_path,
-                        n_gpu_layers=n_gpu_layers,
+                        n_gpu_layers=current_layers,
                         n_ctx=n_ctx,
                         split_mode=split_mode,
                         tensor_split=tensor_split,
-                        use_mmap=False, # Fallback
+                        use_mmap=current_mmap,
                         verbose=True 
                     )
-                    cls._instances[repo_id] = llm
-                    _notify_progress("ready", 1.0, f"{model_name} ready (No MMAP)")
-                    print(f"Model {repo_id} loaded successfully (No MMAP).")
-                    return llm
-                except Exception as fallback_error:
-                     # If fallback also fails, then we really are broken
-                     raise fallback_error
+                    
+                    # Restore env if changed
+                    if hide_gpu:
+                        if original_cuda_visible is not None:
+                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                        else:
+                            del os.environ["CUDA_VISIBLE_DEVICES"]
 
-            _notify_progress("error", -1, f"Failed to load: {e}")
-            print(f"Failed to load model {repo_id}: {e}")
-            raise
+                    cls._instances[repo_id] = llm
+                    _notify_progress("ready", 1.0, f"{model_name} ready")
+                    print(f"✅ Model {repo_id} loaded successfully using: {desc}")
+                    return llm
+
+                except Exception as e:
+                    print(f"⚠️ Load Failed ({desc}): {e}")
+                    last_error = e
+                    # Restore env for next attempt (e.g. going from CPU back to GPU? Unlikely order, but good practice)
+                    if hide_gpu:
+                         if original_cuda_visible is not None:
+                            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                         elif "CUDA_VISIBLE_DEVICES" in os.environ:
+                            del os.environ["CUDA_VISIBLE_DEVICES"]
+                    # Continue to next candidate
+            
+            # If we get here, all attempts failed
+            _notify_progress("error", -1, f"Failed to load: {last_error}")
+            print(f"❌ All load attempts failed for {repo_id}. Last error: {last_error}")
+            raise last_error
+
+        except Exception as e:
+            # Catch-all for the outer try block (API mode, pathing, etc)
+            print(f"❌ Model Manager Error: {e}")
+            _notify_progress("error", -1, str(e))
+            raise e
 
     @classmethod
     def close_all(cls):

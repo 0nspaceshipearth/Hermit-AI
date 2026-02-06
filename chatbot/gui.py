@@ -705,15 +705,7 @@ class ChatbotGUI:
         # Deduplicate by name just in case
         unique_models = []
         seen = set()
-        
-        # Pioneer is an internal engine, not a chat model. Hide it from GUI.
-        pioneer_id = getattr(config, 'MODEL_PIONEER', 'pioneer-translator').lower()
-
         for m, p in models:
-            m_lower = m.lower()
-            if pioneer_id in m_lower or "pioneer" in m_lower:
-                continue
-                
             if m not in seen:
                 unique_models.append((m, p))
                 seen.add(m)

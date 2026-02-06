@@ -2,21 +2,25 @@
 # Note: PyTorch (GPU) is handled by setup.sh
 
 # Embeddings & RAG
-sentence-transformers
-faiss-cpu
-rank_bm25
-beautifulsoup4
-huggingface-hub
-libzim
+sentence-transformers==5.2.2
+faiss-cpu==1.13.2
+rank-bm25==0.2.2
+beautifulsoup4==4.14.3
+huggingface-hub==1.3.7
+libzim==3.8.0
 
 # Local Inference
-llama-cpp-python
+llama-cpp-python==0.3.16
 
 # Utilities
-numpy
-tqdm
-requests
-pandas  # Optional: For data file processing
+numpy==2.4.2
+tqdm==4.67.2
+requests==2.32.5
 
 # GUI
-tkinterdnd2
+tkinterdnd2==0.4.3
+
+# Optional: Forge document support (uncomment as needed)
+# pypdf>=4.0
+# python-docx>=1.0
+# ebooklib>=0.18

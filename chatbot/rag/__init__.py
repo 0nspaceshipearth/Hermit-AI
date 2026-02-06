@@ -131,7 +131,6 @@ class RAGSystem(SearchModule, OrchestrationModule):
         self._comparison_joint = None
         self._filter_joint = None
         self._fact_joint = None
-        self._pioneer_joint = None
 
         if self.use_joints:
             debug_print("Joint system configured for LAZY initialization")
@@ -143,8 +142,7 @@ class RAGSystem(SearchModule, OrchestrationModule):
         try:
             from chatbot.joints import (
                 EntityExtractorJoint, ArticleScorerJoint, CoverageVerifierJoint,
-                ChunkFilterJoint, FactRefinementJoint, ComparisonJoint, MultiHopResolverJoint,
-                PioneerJoint
+                ChunkFilterJoint, FactRefinementJoint, ComparisonJoint, MultiHopResolverJoint
             )
             self._joint_classes = {
                 'entity': EntityExtractorJoint,
@@ -154,7 +152,6 @@ class RAGSystem(SearchModule, OrchestrationModule):
                 'comparison': ComparisonJoint,
                 'filter': ChunkFilterJoint,
                 'fact': FactRefinementJoint,
-                'pioneer': PioneerJoint
             }
             debug_print("Joint classes imported successfully")
         except Exception as e:
@@ -231,12 +228,3 @@ class RAGSystem(SearchModule, OrchestrationModule):
                 debug_print("Initializing FactRefinementJoint (lazy)")
                 self._fact_joint = self._joint_classes['fact']()
         return self._fact_joint
-    @property
-    def pioneer_joint(self):
-        """Lazy initialization of PioneerJoint."""
-        if self._pioneer_joint is None and self.use_joints:
-            self._ensure_joint_classes()
-            if 'pioneer' in self._joint_classes and self._joint_classes['pioneer'] is not None:
-                debug_print("Initializing PioneerJoint (lazy)")
-                self._pioneer_joint = self._joint_classes['pioneer']()
-        return self._pioneer_joint

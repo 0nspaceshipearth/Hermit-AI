@@ -4,7 +4,6 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-import os
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
 # by the Free Software Foundation, either version 3 of the License, or
@@ -20,15 +19,12 @@ import os
 
 """Configuration constants."""
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-
 OLLAMA_CHAT_URL = "N/A" # Legacy/Deprecated
 # Local Model Repositories
 MODEL_QWEN_3B = "Qwen/Qwen2.5-3B-Instruct-GGUF"
 MODEL_QWEN_1_5B = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"  # "Fast" Model
 MODEL_QWEN_7B = "Qwen/Qwen2.5-7B-Instruct-GGUF"      # "Smart" Model
 MODEL_NVIDIA_8B = "bartowski/nvidia_Llama-3.1-Nemotron-Nano-8B-v1-GGUF"
-MODEL_PIONEER = "0nspaceshipearth/pioneer-translator-v4"
 
 # === PERFORMANCE OPTIMIZATION ===
 # Tiered options: 1.5B (~1.3GB) < 3B (~2GB) < 8B (~6GB)
@@ -59,7 +55,6 @@ API_MODEL_NAME = "local-model"  # Passed in API request
 
 # Multi-Joint RAG System Configuration
 USE_JOINTS = True
-USE_PIONEER_JOINT = False # Enable if pioneer_sdk binary is present
 
 
 # === TIERED MODEL ARCHITECTURE ===
@@ -97,6 +92,28 @@ ADAPTIVE_THRESHOLD = 3.0  # Lowered to trigger fewer expansions when data is pre
 
 # Global Context Window Configuration
 DEFAULT_CONTEXT_SIZE = 8192
+
+# === RETRIEVAL CONSTANTS ===
+# Maximum characters of RAG context to inject into the system prompt.
+# ~2500 tokens, leaves headroom in an 8K context window.
+MAX_CONTEXT_CHARS = 10000
+
+# Maximum characters per individual article chunk before truncation.
+MAX_CHUNK_CHARS = 4000
+
+# Default number of top-k results for RAG retrieval.
+DEFAULT_TOP_K = 3
+
+# Maximum links returned in link mode.
+MAX_LINK_RESULTS = 10
+
+# Maximum characters of article text stored per search result.
+MAX_ARTICLE_TEXT_CHARS = 6000
+
+# === GOOGLE GEMINI STUBS (For ModelManager Compatibility) ===
+GOOGLE_API_KEY = None
+MODEL_GEMINI = "gemini-2.0-flash"
+GLOBAL_GEMINI = False
 
 SYSTEM_PROMPT = (
     "You are a helpful, thorough AI assistant. When provided with context, "

@@ -91,6 +91,12 @@ fi
 # 5. Download Models
 echo "[5/6] Downloading AI Models..."
 echo "This may take a while depending on your internet connection."
+# Ensure CUDA libraries from the venv are in the path
+for lib_dir in ./venv/lib/python3.12/site-packages/nvidia/*/lib; do
+    if [ -d "$lib_dir" ]; then
+        export LD_LIBRARY_PATH="${lib_dir}:${LD_LIBRARY_PATH:-}"
+    fi
+done
 ./venv/bin/python download_models.py
 echo "✓ Models downloaded"
 

@@ -41,47 +41,6 @@ class QueryComplexity:
     skip_coverage: bool   # Skip coverage verifier
     max_steps: int        # Reduced orchestration steps for simple queries
 
-def should_use_pioneer(query: str) -> bool:
-    """
-    Detect if a query is about data, mathematics, physics, or statistics
-    where Pioneer's symbolic regression could be useful.
-    """
-    q_lower = query.lower()
-    pioneer_keywords = [
-        'formula', 'equation', 'calculate', 'computation', 'derivative',
-        'integral', 'function', 'graph', 'plot', 'curve',
-        'statistic', 'correlation', 'regression', 'trend', 'average',
-        'mean', 'median', 'deviation', 'variance', 'distribution',
-        'constant', 'coefficient', 'rate', 'velocity', 'acceleration',
-        'force', 'energy', 'power', 'frequency', 'wavelength',
-        'temperature', 'pressure', 'density',
-        'data', 'dataset', 'csv', 'table', 'values', 'measurements',
-        'experiment', 'results', 'findings', 'observations',
-        'relationship between', 'proportional', 'inversely', 'exponential',
-        'linear', 'quadratic', 'logarithmic',
-    ]
-    for keyword in pioneer_keywords:
-        if keyword in q_lower:
-            debug_print(f"Pioneer trigger: found keyword '{keyword}'")
-            return True
-    if re.search(r'\d+\s*[\+\-\*\/\^]\s*\d+', query):
-        debug_print("Pioneer trigger: arithmetic expression in query")
-        return True
-    return False
-
-def content_has_numerical_data(text: str, min_points: int = 4) -> bool:
-    """Check if content has numerical data worth analyzing."""
-    numerical_lines = re.findall(r'^\s*[\d\.\-]+(?:,\s*[\d\.\-]+)+\s*$', text, re.MULTILINE)
-    if len(numerical_lines) >= min_points:
-        return True
-    table_rows = re.findall(r'[\d\.]+\s*[\|\t]\s*[\d\.]+', text)
-    if len(table_rows) >= min_points:
-        return True
-    xy_patterns = re.findall(r'[xXyY]\s*[=:]\s*[\d\.]+', text)
-    if len(xy_patterns) >= min_points:
-        return True
-    return False
-
 
 def classify_query_complexity(query: str) -> QueryComplexity:
     """

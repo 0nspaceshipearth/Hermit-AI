@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Any
 from chatbot import config
 from chatbot.debug_utils import debug_print
 from chatbot.state import HermitContext
-from chatbot.intent import classify_query_complexity, QueryComplexity, should_use_pioneer, content_has_numerical_data
+from chatbot.intent import classify_query_complexity, QueryComplexity
 
 class OrchestrationModule:
     """
@@ -30,10 +30,6 @@ class OrchestrationModule:
         ctx.log(f"🚀 Starting orchestrated retrieval for: '{query}'")
         ctx.log(f"📊 Query complexity: {complexity.level} (max_steps={complexity.max_steps})")
         
-        # Add pioneer_scan if configured
-        if getattr(config, 'USE_PIONEER_JOINT', False):
-            ctx.add_step("pioneer_scan", priority="low")
-        
         # Processing loop
         while not ctx.is_complete():
             step = ctx.pop_step()
@@ -57,8 +53,6 @@ class OrchestrationModule:
                 self._orchestrate_expand(ctx)
             elif step == "targeted_search":
                  self._orchestrate_targeted(ctx)
-            elif step == "pioneer_scan":
-                self._orchestrate_pioneer(ctx)
             else:
                 ctx.log(f"⚠ Unknown step '{step}', skipping")
                 
@@ -372,37 +366,3 @@ class OrchestrationModule:
             # Re-verify after targeted search
             ctx.add_step("verify", priority="normal")
             ctx.log(f"  🔄 GEAR 3: Incomplete coverage ({ctx.signals['coverage_ratio']:.0%}), adding targeted search")
-
-    def _orchestrate_pioneer(self, ctx) -> None:
-        """Execute Pioneer Neuro-Symbolic Scan on retrieved data."""
-        if not getattr(config, 'USE_PIONEER_JOINT', False):
-            return
-        if not should_use_pioneer(ctx.original_query):
-            ctx.log("  Pioneer: Skipped (query not data/math related)")
-            return
-        has_data = False
-        for res in ctx.retrieved_data[:3]:
-            if content_has_numerical_data(res.get('text', '')):
-                has_data = True
-                break
-        if not has_data:
-            ctx.log("  Pioneer: Skipped (no numerical data)")
-            return
-        if not self.pioneer_joint:
-            ctx.log("  Pioneer: Joint not available")
-            return
-        ctx.log("  Pioneer: Analyzing numerical patterns...")
-        try:
-            for res in ctx.retrieved_data:
-                text = res.get('text', '')
-                if not content_has_numerical_data(text):
-                    continue
-                laws = self.pioneer_joint.analyze_content(text)
-                if laws:
-                    ctx.log(f"    Found law: {laws}")
-                    law_block = "\n".join([f"discovered_law: {l}" for l in laws])
-                    res['text'] = f"*** PIONEER DISCOVERY ***\n{law_block}\n***********************\n{text}"
-                    res['score'] = 20.0
-                    ctx.signals["highest_source_score"] = 20.0
-        except Exception as e:
-            ctx.log(f"  Pioneer scan failed: {e}")
