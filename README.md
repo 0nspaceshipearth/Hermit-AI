@@ -7,8 +7,8 @@
 offline ai chatbot for wikipedia and zim archives. no cloud, no api keys, no tracking.
 
 ---
+<img width="901" height="693" alt="Screenshot_20260206_143725" src="https://github.com/user-attachments/assets/fb75178e-13c7-48b1-8626-48cc2c862407" />
 
-<img width="895" height="697" alt="hermit screenshot" src="https://github.com/user-attachments/assets/a60de92a-38cf-42a8-bd31-ca96429d5bf5" />
 
 ---
 
