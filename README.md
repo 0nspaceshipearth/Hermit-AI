@@ -7,8 +7,7 @@
 offline ai chatbot for wikipedia and zim archives. no cloud, no api keys, no tracking.
 
 ---
-
-
+<img width="898" height="701" alt="Screenshot_20260207_133837" src="https://github.com/user-attachments/assets/721fd20d-6343-40bc-8daf-3929e565f6b8" />
 ---
 
 ### what hermit does differently
