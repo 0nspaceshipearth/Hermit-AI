@@ -28,10 +28,18 @@ from typing import List, Tuple, Optional
 from urllib.request import Request, urlopen
 
 from chatbot.models import Message, ModelPlatform
-from chatbot.chat import stream_chat, full_chat, build_messages, set_status_callback, retrieve_and_display_links
+from chatbot.chat import (
+    stream_chat,
+    full_chat,
+    build_messages,
+    set_status_callback,
+    retrieve_and_display_links,
+    clear_runtime_memory,
+)
 from chatbot import config
 from chatbot.config import DEFAULT_MODEL
 from chatbot.model_manager import set_download_callback
+from chatbot.preferences import load_theme_name, save_theme_name
 
 
 class DownloadProgressDialog:
@@ -51,7 +59,7 @@ class DownloadProgressDialog:
         """Show the progress dialog."""
         if self.dialog:
             return  # Already showing
-        
+
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title(title)
         self.dialog.geometry("400x150")
@@ -212,7 +220,17 @@ class ChatbotGUI:
         
         self.history: List[Message] = []
         self.query_history: List[str] = []
-        self.dark_mode = True
+        self.themes = self._build_themes()
+        saved_theme = load_theme_name()
+        self.theme_name = saved_theme if saved_theme in self.themes else "Noir"
+        self._theme_palette = self.themes[self.theme_name]
+        self.dark_mode = self._theme_palette["dark"]
+        self.use_terminal_dialogs = True
+        self.command_mode = None
+        self._terminal_menu_active = False
+        self._terminal_menu_start_mark = "terminal_menu_start"
+        self._terminal_menu_end_mark = "terminal_menu_end"
+        self._terminal_menu_tag = "terminal_menu_block"
         
         # Dual mode: link_mode (default) vs response_mode
         self.link_mode = False  # Default to Response mode
@@ -221,6 +239,7 @@ class ChatbotGUI:
         self.root.title(f"Hermit - {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
         self.root.geometry("900x700")
         self.root.minsize(400, 300)  # Minimum window size to keep input visible
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
         # Main container using grid for better resize behavior
         self.root.grid_rowconfigure(0, weight=1)  # Chat area expands
@@ -277,7 +296,7 @@ class ChatbotGUI:
         self.input_entry.bind("<Up>", self.on_autocomplete_nav)
         self.input_entry.bind("<Down>", self.on_autocomplete_nav)
         self.input_entry.bind("<Tab>", self.on_autocomplete_select)
-        self.input_entry.bind("<Escape>", self.on_autocomplete_close)
+        self.input_entry.bind("<Escape>", self.on_input_escape)
         self.input_entry.bind("<FocusOut>", self.on_input_focus_out)
         
         # Autocomplete listbox
@@ -372,9 +391,9 @@ class ChatbotGUI:
 
         if status == "downloading":
             # Format progress message - clean, no emojis
-            pct = int(progress * 100) if progress >= 0 else 0
-            progress_bar = self._make_progress_bar(pct)
-            msg = f"Downloading {detail}\n{progress_bar} {pct}%"
+            pct = max(0.0, min(100.0, progress * 100.0)) if progress >= 0 else 0.0
+            progress_bar = self._make_progress_bar(int(pct))
+            msg = f"Downloading {detail}\n{progress_bar} {pct:0.1f}%"
             self._show_download_bubble(msg)
 
         elif status == "loading":
@@ -434,13 +453,9 @@ class ChatbotGUI:
                 self._download_bubble_end
             )
 
-            # Match existing bubble style - same bg, darker gray text
-            if self.dark_mode:
-                bg_color = "#1E1E1E"
-                fg_color = "#808080"  # Darker gray text
-            else:
-                bg_color = "#E0E0E0"
-                fg_color = "#606060"  # Darker gray text
+            # Match existing bubble style
+            bg_color = self._theme_palette.get("bubble_bg", "#1E1E1E" if self.dark_mode else "#E0E0E0")
+            fg_color = self._theme_palette.get("muted_fg", "#808080" if self.dark_mode else "#606060")
 
             self.chat_display.tag_config(
                 self._download_bubble_tag,
@@ -596,6 +611,7 @@ class ChatbotGUI:
                 # If we aren't "loading" but got an update, maybe show it?
                 # No, that would be weird.
                 return
+            was_near_bottom = self._is_near_bottom()
             
             ranges = self.chat_display.tag_ranges("loading_content_text")
             if ranges:
@@ -613,9 +629,18 @@ class ChatbotGUI:
                 self.chat_display.tag_add("loading_bubble", start, new_end)
                 self.chat_display.tag_add(f"ai_message_{id(self)}", start, new_end)
                 
-                self.chat_display.see(self.tk.END)
+                if was_near_bottom:
+                    self.chat_display.see(self.tk.END)
                 
         self.root.after(0, _update)
+
+    def _is_near_bottom(self, margin: float = 0.001) -> bool:
+        """Return True when chat viewport is at/near bottom."""
+        try:
+            _, last = self.chat_display.yview()
+            return last >= (1.0 - margin)
+        except Exception:
+            return True
 
     
     def _get_pulse_color(self) -> str:
@@ -657,6 +682,681 @@ class ChatbotGUI:
         
         # Schedule next frame (60ms for smooth animation)
         self.loading_animation_id = self.root.after(60, self._animate_loading_pulse)
+
+    def on_input_escape(self, event):
+        """Handle Escape key for command modes or autocomplete."""
+        if self.command_mode:
+            self._exit_command_mode(cancelled=True)
+            return "break"
+        return self.on_autocomplete_close(event)
+
+    def _post_system(self, text: str):
+        """Post a system message from any thread."""
+        try:
+            self.root.after(0, lambda: self.append_message("system", text))
+        except Exception:
+            print(text)
+
+    def _render_terminal_menu(self, text: str):
+        """Render or update a terminal-style menu block in chat."""
+        try:
+            ranges = list(self.chat_display.tag_ranges(self._terminal_menu_tag))
+            if ranges:
+                for i in range(len(ranges) - 2, -1, -2):
+                    start = ranges[i]
+                    end = ranges[i + 1]
+                    self.chat_display.delete(start, end)
+
+            block_start = self.chat_display.index(self.tk.END)
+            self.chat_display.mark_set(self._terminal_menu_start_mark, block_start)
+            self.chat_display.mark_gravity(self._terminal_menu_start_mark, self.tk.LEFT)
+
+            self.chat_display.insert(self.tk.END, "\n")
+            content_start = self.chat_display.index(self.tk.END)
+            self.chat_display.insert(self.tk.END, text)
+            content_end = self.chat_display.index(self.tk.END)
+            self.chat_display.insert(self.tk.END, "\n\n")
+            block_end = self.chat_display.index(self.tk.END)
+            self.chat_display.mark_set(self._terminal_menu_end_mark, block_end)
+            self.chat_display.mark_gravity(self._terminal_menu_end_mark, self.tk.LEFT)
+
+            self.chat_display.tag_add(self._terminal_menu_tag, block_start, block_end)
+
+            tag_name = f"system_message_{id(self)}"
+            self.chat_display.tag_add(tag_name, content_start, content_end)
+            self._configure_message_tag(tag_name, "system")
+            self.chat_display.tag_config(
+                tag_name,
+                font=("Consolas", 10),
+                lmargin1=10,
+                lmargin2=10,
+                rmargin=10,
+                spacing1=3,
+                spacing2=1,
+                spacing3=3
+            )
+
+            # Highlight confirmation keywords for clarity.
+            yes_color = "#5CD67A" if self.dark_mode else "#1E8E3E"
+            escape_color = "#FF6B6B" if self.dark_mode else "#C62828"
+            self.chat_display.tag_config("terminal_menu_yes", foreground=yes_color, font=("Consolas", 10, "bold"))
+            self.chat_display.tag_config("terminal_menu_escape", foreground=escape_color, font=("Consolas", 10, "bold"))
+            self._highlight_terminal_keyword(content_start, content_end, "YES", "terminal_menu_yes")
+            self._highlight_terminal_keyword(content_start, content_end, "Escape", "terminal_menu_escape", nocase=True)
+            self.chat_display.see(self.tk.END)
+            self.chat_display.update_idletasks()
+
+            self._terminal_menu_active = True
+        except Exception as e:
+            print(f"[GUI] Terminal menu error: {e}")
+
+    def _highlight_terminal_keyword(self, start: str, end: str, keyword: str, tag: str, nocase: bool = False):
+        """Apply a tag to each keyword occurrence within a terminal menu block."""
+        idx = start
+        while True:
+            idx = self.chat_display.search(keyword, idx, stopindex=end, nocase=1 if nocase else 0)
+            if not idx:
+                break
+            keyword_end = f"{idx}+{len(keyword)}c"
+            self.chat_display.tag_add(tag, idx, keyword_end)
+            idx = keyword_end
+
+    def _clear_terminal_menu(self):
+        """Remove the currently rendered terminal menu block."""
+        try:
+            ranges = list(self.chat_display.tag_ranges(self._terminal_menu_tag))
+            if ranges:
+                for i in range(len(ranges) - 2, -1, -2):
+                    start = ranges[i]
+                    end = ranges[i + 1]
+                    self.chat_display.delete(start, end)
+            self.chat_display.mark_unset(self._terminal_menu_start_mark)
+            self.chat_display.mark_unset(self._terminal_menu_end_mark)
+        except Exception:
+            pass
+        self._terminal_menu_active = False
+
+    def _close_command_mode(self):
+        """Close command mode and clear its on-screen menu block."""
+        self.command_mode = None
+        self._clear_terminal_menu()
+
+    def _exit_command_mode(self, cancelled: bool = False):
+        """Exit the current command mode."""
+        if not self.command_mode:
+            return
+
+        mode = self.command_mode.get("name")
+        if cancelled and mode == "themes":
+            original = self.command_mode.get("original_theme")
+            if original:
+                self.set_theme(original, persist=True)
+
+        self._close_command_mode()
+
+    def _render_current_command_menu(self):
+        if not self.command_mode:
+            return
+        mode = self.command_mode.get("name")
+        if mode == "themes":
+            self._render_themes_menu()
+        elif mode == "model":
+            self._render_model_menu()
+        elif mode == "api":
+            self._render_api_menu()
+        elif mode == "forge":
+            self._render_forge_menu()
+
+    def _handle_command_input(self, user_input: str):
+        """Route input to the active terminal mode handler."""
+        if not self.command_mode:
+            return
+        mode = self.command_mode.get("name")
+        if mode == "themes":
+            self._handle_themes_input(user_input)
+        elif mode == "model":
+            self._handle_model_input(user_input)
+        elif mode == "api":
+            self._handle_api_input(user_input)
+        elif mode == "forge":
+            self._handle_forge_input(user_input)
+
+    def _command_menu_nav(self, delta: int):
+        """Navigate the active menu with Up/Down keys."""
+        if not self.command_mode:
+            return
+        if self.command_mode.get("type") != "menu":
+            return
+        items = self.command_mode.get("items", [])
+        if not items:
+            return
+        idx = self.command_mode.get("index", 0)
+        idx = (idx + delta) % len(items)
+        self.command_mode["index"] = idx
+        if self.command_mode.get("name") == "themes":
+            self._preview_theme(idx)
+        self._render_current_command_menu()
+
+    def _preview_theme(self, index: int):
+        items = self.command_mode.get("items", [])
+        if not items or index < 0 or index >= len(items):
+            return
+        self.set_theme(items[index], persist=False)
+
+    def _enter_themes_mode(self):
+        items = list(self.themes.keys())
+        if not items:
+            self.append_message("system", "No themes available.")
+            return
+        current = self.theme_name
+        idx = items.index(current) if current in items else 0
+        self.command_mode = {
+            "name": "themes",
+            "type": "menu",
+            "items": items,
+            "index": idx,
+            "original_theme": current,
+        }
+        self._render_themes_menu()
+
+    def _render_themes_menu(self):
+        items = self.command_mode.get("items", [])
+        idx = self.command_mode.get("index", 0)
+        lines = []
+        for i, name in enumerate(items):
+            mode = "Dark" if self.themes[name]["dark"] else "Light"
+            marker = ">" if i == idx else " "
+            current = " *" if name == self.theme_name else ""
+            lines.append(f"{marker} {i+1}. {name} ({mode}){current}")
+        text = (
+            "THEMES\n"
+            "Use Up/Down to preview, Enter to apply, Esc to cancel (revert).\n"
+            "You can also type a number or theme name.\n\n"
+            + "\n".join(lines)
+        )
+        self._render_terminal_menu(text)
+
+    def _handle_themes_input(self, user_input: str):
+        text = user_input.strip()
+        if not text:
+            save_theme_name(self.theme_name)
+            self._close_command_mode()
+            self.append_message("system", f"Theme set to {self.theme_name}.")
+            return
+        lowered = text.lower()
+        if lowered in {"cancel", "exit", "quit"}:
+            self._exit_command_mode(cancelled=True)
+            return
+        if text.isdigit():
+            idx = int(text) - 1
+            items = self.command_mode.get("items", [])
+            if 0 <= idx < len(items):
+                self.set_theme(items[idx])
+                self._close_command_mode()
+                self.append_message("system", f"Theme set to {items[idx]}.")
+                return
+        resolved = self._resolve_theme_name(text)
+        if resolved:
+            self.set_theme(resolved)
+            self._close_command_mode()
+            self.append_message("system", f"Theme set to {resolved}.")
+            return
+        self.append_message("system", f"Unknown theme '{text}'.")
+
+    def _format_model_display(self, model_name: str) -> str:
+        import re
+        display_name = model_name.split('/')[-1] if '/' in model_name else model_name
+        display_name = re.sub(r'-(\d+)-of-(\d+)\.gguf$', '.gguf', display_name)
+        if "qwen2.5-3b" in display_name.lower():
+            quant_match = re.search(r'(q\d+_k_[msl]|q[2-8]_0)', display_name, re.IGNORECASE)
+            quant = quant_match.group(1).upper() if quant_match else "Unknown"
+            display_name = f"Qwen 2.5 3B ({quant})"
+        elif "qwen2.5-7b" in display_name.lower():
+            quant_match = re.search(r'(q\d+_k_[msl]|q[2-8]_0)', display_name, re.IGNORECASE)
+            quant = quant_match.group(1).upper() if quant_match else "Unknown"
+            display_name = f"Qwen 2.5 7B ({quant})"
+        elif "qwen2.5-1.5b" in display_name.lower() or "qwen2.5-1b" in display_name.lower():
+            quant_match = re.search(r'(q\d+_k_[msl]|q[2-8]_0)', display_name, re.IGNORECASE)
+            quant = quant_match.group(1).upper() if quant_match else "Unknown"
+            display_name = f"Qwen 2.5 1.5B ({quant})"
+        elif "llama-3.2-3b" in display_name.lower():
+            quant_match = re.search(r'(q\d+_k_[msl]|q[2-8]_0)', display_name, re.IGNORECASE)
+            quant = quant_match.group(1).upper() if quant_match else "Unknown"
+            display_name = f"Llama 3.2 3B ({quant})"
+        elif "llama-3" in display_name.lower() and "8b" in display_name.lower():
+            quant_match = re.search(r'(q\d+_k_[msl]|q[2-8]_0)', display_name, re.IGNORECASE)
+            quant = quant_match.group(1).upper() if quant_match else "Unknown"
+            display_name = f"Llama 3 8B ({quant})"
+        return display_name
+
+    def _enter_model_mode(self):
+        models = self.get_installed_models()
+        if not models:
+            self.append_message("system", "No models found.")
+            return
+        model_list = [m for m, _ in models]
+        display_list = [self._format_model_display(m) for m in model_list]
+        idx = model_list.index(self.model) if self.model in model_list else 0
+        self.command_mode = {
+            "name": "model",
+            "type": "menu",
+            "items": model_list,
+            "display": display_list,
+            "index": idx,
+            "pending": None,
+        }
+        self._render_model_menu()
+
+    def _render_model_menu(self):
+        items = self.command_mode.get("items", [])
+        display = self.command_mode.get("display", [])
+        idx = self.command_mode.get("index", 0)
+        pending = self.command_mode.get("pending")
+        lines = []
+        for i, name in enumerate(items):
+            marker = ">" if i == idx else " "
+            current = " *" if name == self.model else ""
+            label = display[i] if i < len(display) else name
+            lines.append(f"{marker} {i+1}. {label}{current}")
+
+        footer = "Commands: Enter=select | type 'delete' on highlighted | paste HF repo/url=download | Esc=cancel"
+        download_hint = "Download: paste HF repo/url (GGUF only)"
+        if pending:
+            footer = f"PENDING: {pending.get('prompt', '')}"
+
+        text = (
+            "MODEL SELECTOR\n"
+            f"Current model: {self.model}\n"
+            + (f"{download_hint}\n" if not pending else "")
+            + "\n".join(lines)
+            + "\n\n"
+            + footer
+        )
+        self._render_terminal_menu(text)
+
+    def _queue_model_download(self, repo_id: str):
+        """Queue a model download confirmation prompt."""
+        if not repo_id:
+            self.append_message("system", "Usage: paste a Hugging Face repo id (owner/repo).")
+            return
+        prompt = f"Confirm download '{repo_id}'. Type YES to confirm, or press Escape to cancel."
+        if "gguf" not in repo_id.lower():
+            prompt = (
+                f"'{repo_id}' does not include 'GGUF'. Hermit only supports GGUF.\n"
+                "Type YES to continue, or press Escape to cancel."
+            )
+        self.command_mode["pending"] = {
+            "action": "download",
+            "repo_id": repo_id,
+            "prompt": prompt,
+        }
+        self._render_model_menu()
+
+    def _queue_model_delete(self, index: Optional[int] = None):
+        """Queue a delete confirmation for a model index or the highlighted item."""
+        items = self.command_mode.get("items", [])
+        if not items:
+            self.append_message("system", "No models available to delete.")
+            return
+
+        if index is None:
+            index = self.command_mode.get("index", 0)
+
+        if index < 0 or index >= len(items):
+            self.append_message("system", "No valid highlighted model selected.")
+            return
+
+        model_id = items[index]
+        self.command_mode["pending"] = {
+            "action": "delete",
+            "model_id": model_id,
+            "prompt": f"Confirm delete '{model_id}'. Type YES to confirm, or press Escape to cancel.",
+        }
+        self._render_model_menu()
+
+    def _normalize_hf_repo_input(self, text: str) -> Optional[str]:
+        """Normalize pasted Hugging Face repo id or URL to owner/repo."""
+        candidate = (text or "").strip().strip("\"'").rstrip("/")
+        if not candidate:
+            return None
+
+        lowered = candidate.lower()
+        if lowered.startswith("hf:"):
+            candidate = candidate[3:].strip()
+        elif lowered.startswith("repo:"):
+            candidate = candidate[5:].strip()
+
+        if candidate.lower().startswith("hf.co/"):
+            candidate = "https://" + candidate
+
+        if candidate.lower().startswith(("http://", "https://")):
+            from urllib.parse import urlparse
+
+            parsed = urlparse(candidate)
+            host = parsed.netloc.lower()
+            if host not in {"huggingface.co", "www.huggingface.co", "hf.co"}:
+                return None
+
+            parts = [p for p in parsed.path.split("/") if p]
+            if len(parts) < 2:
+                return None
+
+            # Support URLs like /owner/repo and /models/owner/repo
+            if parts[0] in {"models", "spaces", "datasets"} and len(parts) >= 3:
+                owner, repo = parts[1], parts[2]
+            else:
+                owner, repo = parts[0], parts[1]
+
+            repo_id = f"{owner}/{repo}".strip().rstrip("/")
+            return repo_id if owner and repo else None
+
+        candidate = candidate.split("?", 1)[0].split("#", 1)[0].strip().rstrip("/")
+        if " " in candidate or "/" not in candidate:
+            return None
+        owner, repo = candidate.split("/", 1)
+        return candidate if owner and repo else None
+
+    def _apply_model_selection(self, model_name: str):
+        if model_name != self.model:
+            self.model = model_name
+            self.root.title(f"Chatbot - {model_name} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+            self.append_message("system", f"Model changed to: {model_name}")
+            self.update_status(f"Model: {model_name}")
+
+    def _handle_model_input(self, user_input: str):
+        text = user_input.strip()
+        if not text:
+            items = self.command_mode.get("items", [])
+            idx = self.command_mode.get("index", 0)
+            if items:
+                self._apply_model_selection(items[idx])
+            self._close_command_mode()
+            return
+
+        lowered = text.lower()
+        if lowered in {"cancel", "exit", "quit"}:
+            self._exit_command_mode(cancelled=True)
+            return
+
+        pending = self.command_mode.get("pending")
+        if pending:
+            if lowered in {"yes", "y"}:
+                action = pending.get("action")
+                if action == "delete":
+                    self._perform_model_delete(pending.get("model_id"))
+                elif action == "download":
+                    self._perform_model_download(pending.get("repo_id"))
+                self._close_command_mode()
+            else:
+                self._close_command_mode()
+                self.append_message("system", "Canceled.")
+            return
+
+        if lowered == "delete":
+            self._queue_model_delete()
+            return
+
+        if lowered.startswith("delete "):
+            self.append_message("system", "Type 'delete' to remove the highlighted model.")
+            return
+
+        if lowered.startswith("dl ") or lowered.startswith("download "):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 2:
+                repo_id = parts[1].strip()
+                if not repo_id:
+                    self.append_message("system", "Usage: dl <repo_id>")
+                    return
+                normalized_repo = self._normalize_hf_repo_input(repo_id) or repo_id
+                self._queue_model_download(normalized_repo)
+                return
+
+        if text.isdigit():
+            idx = int(text) - 1
+            items = self.command_mode.get("items", [])
+            if 0 <= idx < len(items):
+                self._apply_model_selection(items[idx])
+                self._close_command_mode()
+                return
+
+        items = self.command_mode.get("items", [])
+        matches = [m for m in items if m.lower() == lowered]
+        if matches:
+            self._apply_model_selection(matches[0])
+            self._close_command_mode()
+            return
+
+        # Treat pasted Hugging Face repo ids/URLs as a direct download request.
+        repo_id = self._normalize_hf_repo_input(text)
+        if repo_id:
+            self._queue_model_download(repo_id)
+            return
+
+        self.append_message("system", "Unknown model command.")
+
+    def _perform_model_delete(self, model_id: str):
+        if not model_id:
+            return
+        if not model_id.lower().endswith(".gguf"):
+            self.append_message("system", "Only downloaded GGUF files can be deleted.")
+            return
+        import os
+        from chatbot.model_manager import ModelManager
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        file_path = os.path.join(project_root, "shared_models", model_id)
+        was_active_model = (self.model == model_id)
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                self.append_message("system", f"Deleted: {model_id}")
+                items = self.command_mode.get("items", [])
+                display = self.command_mode.get("display", [])
+                if model_id in items:
+                    idx = items.index(model_id)
+                    items.pop(idx)
+                    if idx < len(display):
+                        display.pop(idx)
+                    if items:
+                        self.command_mode["index"] = min(idx, len(items) - 1)
+
+                # Ensure deleted models are not kept alive in RAM cache.
+                ModelManager.close_all()
+
+                if was_active_model:
+                    fallback_model = config.DEFAULT_MODEL
+                    if fallback_model == model_id and items:
+                        fallback_model = items[0]
+                    self.model = fallback_model
+                    self.root.title(f"Chatbot - {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+                    self.append_message("system", f"Active model removed. Reverted to: {self.model}")
+                    self.update_status(f"Model: {self.model}")
+            else:
+                self.append_message("system", f"File not found: {file_path}")
+        except Exception as e:
+            self.append_message("system", f"Delete failed: {e}")
+
+    def _perform_model_download(self, repo_id: str):
+        if not repo_id:
+            return
+        self._start_model_download(repo_id)
+        self.append_message("system", f"Downloading: {repo_id}")
+
+    def _enter_api_mode(self):
+        self.command_mode = {
+            "name": "api",
+            "type": "input",
+            "api_mode": config.API_MODE,
+            "url": config.API_BASE_URL,
+            "key": config.API_KEY,
+            "model": config.API_MODEL_NAME,
+        }
+        self._render_api_menu()
+
+    def _render_api_menu(self):
+        mask = lambda v: "*" * len(v) if v else "None"
+        data = self.command_mode
+        text = (
+            "API CONFIG\n"
+            f"mode: {'on' if data['api_mode'] else 'off'}\n"
+            f"url: {data['url'] or 'None'}\n"
+            f"key: {mask(data['key'])}\n"
+            f"model: {data['model'] or 'None'}\n\n"
+            "Commands:\n"
+            "  mode on|off\n"
+            "  url <base_url>\n"
+            "  key <api_key>\n"
+            "  model <model_name>\n"
+            "  test\n"
+            "  save\n"
+            "  cancel (Esc)\n"
+        )
+        self._render_terminal_menu(text)
+
+    def _handle_api_input(self, user_input: str):
+        text = user_input.strip()
+        lowered = text.lower()
+        if not text:
+            self._render_api_menu()
+            return
+        if lowered in {"cancel", "exit", "quit"}:
+            self._exit_command_mode(cancelled=True)
+            return
+        if lowered == "test":
+            self._test_api_connection()
+            return
+        if lowered == "save":
+            self._save_api_config()
+            self._close_command_mode()
+            return
+
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            key, value = parts[0].lower(), parts[1].strip()
+            if key == "mode":
+                self.command_mode["api_mode"] = value.lower() in {"on", "true", "1", "yes"}
+            elif key == "url":
+                self.command_mode["url"] = value
+            elif key == "key":
+                self.command_mode["key"] = value
+            elif key == "model":
+                self.command_mode["model"] = value
+            else:
+                self.append_message("system", "Unknown API command.")
+                return
+            self._render_api_menu()
+            return
+        self.append_message("system", "Invalid command. Use 'save' or 'cancel' or 'test'.")
+
+    def _save_api_config(self):
+        data = self.command_mode
+        config.API_MODE = data["api_mode"]
+        config.API_BASE_URL = data["url"]
+        config.API_KEY = data["key"]
+        config.API_MODEL_NAME = data["model"]
+
+        from chatbot.model_manager import ModelManager
+        ModelManager.close_all()
+
+        mode_str = "External API" if config.API_MODE else "Local Internal"
+        self.append_message("system", f"Configuration saved. Switched to {mode_str} Mode.")
+        if config.API_MODE:
+            self.model = config.API_MODEL_NAME
+            self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+
+    def _test_api_connection(self):
+        data = self.command_mode
+        url = data.get("url", "")
+        key = data.get("key", "")
+        model = data.get("model", "")
+
+        self.append_message("system", "Testing API connection...")
+
+        def run_test():
+            try:
+                from chatbot.api_client import OpenAIClientWrapper
+                client = OpenAIClientWrapper(url, key, model)
+                resp = client.create_chat_completion(
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=5
+                )
+                if resp:
+                    self._post_system("API connection successful.")
+                else:
+                    self._post_system("API connection returned empty response.")
+            except Exception as e:
+                self._post_system(f"API connection error: {e}")
+
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _enter_forge_mode(self, args_line: Optional[str] = None):
+        self.command_mode = {
+            "name": "forge",
+            "type": "input",
+        }
+        if args_line:
+            self._run_forge_cli(args_line)
+            self._close_command_mode()
+            return
+        self._render_forge_menu()
+
+    def _render_forge_menu(self):
+        text = (
+            "FORGE\n"
+            "Enter Forge CLI arguments (same as terminal usage).\n"
+            "Example:\n"
+            "  /path/to/docs -o kb.zim -t \"My Knowledge Base\"\n\n"
+            "Type 'cancel' to abort."
+        )
+        self._render_terminal_menu(text)
+
+    def _handle_forge_input(self, user_input: str):
+        text = user_input.strip()
+        if not text or text.lower() in {"cancel", "exit", "quit"}:
+            self._exit_command_mode(cancelled=True)
+            return
+        self._run_forge_cli(text)
+        self._close_command_mode()
+
+    def _run_forge_cli(self, args_line: str):
+        import shlex
+        import subprocess
+        import sys
+        import os
+
+        args = shlex.split(args_line)
+        if not args:
+            self.append_message("system", "No Forge arguments provided.")
+            return
+
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        forge_path = os.path.join(project_root, "forge.py")
+
+        self.append_message("system", f"Running Forge: {args_line}")
+
+        def run():
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, "-u", forge_path, *args],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if proc.stdout:
+                    for line in proc.stdout:
+                        if line:
+                            self._post_system(f"[forge] {line.rstrip()}")
+                if proc.stderr:
+                    for line in proc.stderr:
+                        if line:
+                            self._post_system(f"[forge][err] {line.rstrip()}")
+                proc.wait()
+                self._post_system(f"Forge finished with code {proc.returncode}.")
+            except Exception as e:
+                self._post_system(f"Forge error: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
     
     def get_installed_models(self) -> List[Tuple[str, ModelPlatform]]:
         """Get list of supported local models from config and shared_models directory."""
@@ -834,6 +1534,7 @@ class ChatbotGUI:
             
             selected_idx = selection[0]
             model_id = model_list[selected_idx]
+            was_active_model = (self.model == model_id)
             
             # Only allow deletion of local .gguf files, not config-defined models
             if not model_id.lower().endswith(".gguf"):
@@ -861,6 +1562,18 @@ class ChatbotGUI:
                     # Refresh list
                     model_listbox.delete(selected_idx)
                     model_list.pop(selected_idx)
+
+                    from chatbot.model_manager import ModelManager
+                    ModelManager.close_all()
+
+                    if was_active_model:
+                        fallback_model = config.DEFAULT_MODEL
+                        if fallback_model == model_id and model_list:
+                            fallback_model = model_list[0]
+                        self.model = fallback_model
+                        self.root.title(f"Chatbot - {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+                        self.append_message("system", f"Active model removed. Reverted to: {self.model}")
+                        self.update_status(f"Model: {self.model}")
                 else:
                     self.messagebox.showerror("Error", f"File not found:\n{file_path}")
             except Exception as e:
@@ -982,53 +1695,294 @@ class ChatbotGUI:
                  self.root.after(0, lambda: self.append_message("system", f"Download failed: {e}"))
         
         threading.Thread(target=run_dl, daemon=True).start()
+
+    def _build_themes(self) -> dict:
+        """Return theme palette definitions."""
+        return {
+            "Noir": {
+                "dark": True,
+                "bg": "#2A2A2A",
+                "fg": "#E0E0E0",
+                "input_bg": "#1E1E1E",
+                "input_fg": "#FFFFFF",
+                "accent": "#808080",
+                "button_bg": "#333333",
+                "button_fg": "#FFFFFF",
+                "border": "#444444",
+                "concept": "#81D4FA",
+                "bubble_bg": "#1E1E1E",
+                "muted_fg": "#808080",
+            },
+            "Paper": {
+                "dark": False,
+                "bg": "#FFFFFF",
+                "fg": "#000000",
+                "input_bg": "#F5F5F5",
+                "input_fg": "#000000",
+                "accent": "#666666",
+                "button_bg": "#E0E0E0",
+                "button_fg": "#000000",
+                "border": "#CCCCCC",
+                "concept": "#0277BD",
+                "bubble_bg": "#E0E0E0",
+                "muted_fg": "#606060",
+            },
+            "Slate": {
+                "dark": True,
+                "bg": "#24272B",
+                "fg": "#E6E8EA",
+                "input_bg": "#1D2024",
+                "input_fg": "#F3F4F5",
+                "accent": "#4F7CAC",
+                "button_bg": "#2E3237",
+                "button_fg": "#F1F1F1",
+                "border": "#3A3F45",
+                "concept": "#7BB7FF",
+                "bubble_bg": "#1D2024",
+                "muted_fg": "#9AA3AD",
+            },
+            "Forest": {
+                "dark": True,
+                "bg": "#1F2420",
+                "fg": "#E5E7E1",
+                "input_bg": "#171B18",
+                "input_fg": "#F1F3EE",
+                "accent": "#6AA84F",
+                "button_bg": "#2A302A",
+                "button_fg": "#F1F3EE",
+                "border": "#3A433B",
+                "concept": "#9AD18B",
+                "bubble_bg": "#1A1F1B",
+                "muted_fg": "#9AA88E",
+            },
+            "Sunrise": {
+                "dark": False,
+                "bg": "#FFF6ED",
+                "fg": "#2B2520",
+                "input_bg": "#FFF1E2",
+                "input_fg": "#2B2520",
+                "accent": "#D97B30",
+                "button_bg": "#F2E4D7",
+                "button_fg": "#2B2520",
+                "border": "#E2CDB8",
+                "concept": "#B85B1E",
+                "bubble_bg": "#F2E4D7",
+                "muted_fg": "#6B5B4C",
+            },
+            "Nord": {
+                "dark": True,
+                "bg": "#2B303A",
+                "fg": "#ECEFF4",
+                "input_bg": "#242933",
+                "input_fg": "#ECEFF4",
+                "accent": "#88C0D0",
+                "button_bg": "#343A46",
+                "button_fg": "#ECEFF4",
+                "border": "#3B4252",
+                "concept": "#8FBCBB",
+                "bubble_bg": "#232833",
+                "muted_fg": "#A7B1C2",
+            },
+            "Lagoon": {
+                "dark": True,
+                "bg": "#1E2A2F",
+                "fg": "#E3F0F0",
+                "input_bg": "#162026",
+                "input_fg": "#E3F0F0",
+                "accent": "#4FB6B2",
+                "button_bg": "#26343A",
+                "button_fg": "#E3F0F0",
+                "border": "#304249",
+                "concept": "#6AD7D1",
+                "bubble_bg": "#151F24",
+                "muted_fg": "#93A8A8",
+            },
+            "Cinder": {
+                "dark": True,
+                "bg": "#2C2522",
+                "fg": "#F1E7DF",
+                "input_bg": "#241E1B",
+                "input_fg": "#F5EEE7",
+                "accent": "#C27B5E",
+                "button_bg": "#3A2F2A",
+                "button_fg": "#F1E7DF",
+                "border": "#4A3A34",
+                "concept": "#E0A685",
+                "bubble_bg": "#231D1A",
+                "muted_fg": "#B9A79B",
+            },
+            "Ivory": {
+                "dark": False,
+                "bg": "#FAF7F2",
+                "fg": "#2B2A28",
+                "input_bg": "#F2ECE4",
+                "input_fg": "#2B2A28",
+                "accent": "#B07D62",
+                "button_bg": "#E7DDD2",
+                "button_fg": "#2B2A28",
+                "border": "#D7C9BC",
+                "concept": "#8A5A44",
+                "bubble_bg": "#EDE2D6",
+                "muted_fg": "#6A5A4D",
+            },
+            "Mint": {
+                "dark": False,
+                "bg": "#F4FBF7",
+                "fg": "#203327",
+                "input_bg": "#EAF4EE",
+                "input_fg": "#203327",
+                "accent": "#4E9A6B",
+                "button_bg": "#DCEDE2",
+                "button_fg": "#203327",
+                "border": "#C7DED0",
+                "concept": "#2E7D5A",
+                "bubble_bg": "#E2F0E7",
+                "muted_fg": "#5D6F63",
+            },
+            "High Contrast Dark": {
+                "dark": True,
+                "bg": "#000000",
+                "fg": "#FFFFFF",
+                "input_bg": "#000000",
+                "input_fg": "#FFFFFF",
+                "accent": "#FFD400",
+                "button_bg": "#111111",
+                "button_fg": "#FFFFFF",
+                "border": "#FFFFFF",
+                "concept": "#00E5FF",
+                "bubble_bg": "#000000",
+                "muted_fg": "#CFCFCF",
+            },
+            "High Contrast Light": {
+                "dark": False,
+                "bg": "#FFFFFF",
+                "fg": "#000000",
+                "input_bg": "#FFFFFF",
+                "input_fg": "#000000",
+                "accent": "#005FCC",
+                "button_bg": "#F5F5F5",
+                "button_fg": "#000000",
+                "border": "#000000",
+                "concept": "#003B80",
+                "bubble_bg": "#F0F0F0",
+                "muted_fg": "#2A2A2A",
+            },
+            "Amber Terminal": {
+                "dark": True,
+                "bg": "#000000",
+                "fg": "#FFC34D",
+                "input_bg": "#000000",
+                "input_fg": "#FFD37A",
+                "accent": "#FFB300",
+                "button_bg": "#1A1200",
+                "button_fg": "#FFD37A",
+                "border": "#A66B00",
+                "concept": "#FFE082",
+                "bubble_bg": "#120D00",
+                "muted_fg": "#D7A64A",
+            },
+            "Cyan Terminal": {
+                "dark": True,
+                "bg": "#000000",
+                "fg": "#7CF9FF",
+                "input_bg": "#000000",
+                "input_fg": "#B5FDFF",
+                "accent": "#00C2D1",
+                "button_bg": "#00161A",
+                "button_fg": "#B5FDFF",
+                "border": "#00A7B5",
+                "concept": "#E0FEFF",
+                "bubble_bg": "#001014",
+                "muted_fg": "#7EC7CC",
+            },
+            "Hacker": {
+                "dark": True,
+                "bg": "#000000",
+                "fg": "#00FF66",
+                "input_bg": "#000000",
+                "input_fg": "#76FFB1",
+                "accent": "#00CC55",
+                "button_bg": "#001A0D",
+                "button_fg": "#76FFB1",
+                "border": "#00A347",
+                "concept": "#B3FFCC",
+                "bubble_bg": "#001108",
+                "muted_fg": "#4FD68C",
+            },
+        }
+
+    def _resolve_theme_name(self, name: str) -> Optional[str]:
+        if not name:
+            return None
+        token = name.strip().lower()
+        aliases = {
+            "dark": "Noir",
+            "light": "Paper",
+            "default": "Noir",
+            "classic": "Noir",
+            "hc-dark": "High Contrast Dark",
+            "hc-light": "High Contrast Light",
+            "amber": "Amber Terminal",
+            "cyan": "Cyan Terminal",
+            "hacker": "Hacker",
+            "matrix": "Hacker",
+            "green": "Hacker",
+        }
+        if token in aliases:
+            return aliases[token]
+        for theme_name in self.themes.keys():
+            if theme_name.lower() == token or theme_name.lower().startswith(token):
+                return theme_name
+        return None
+
+    def set_theme(self, name: str, persist: bool = True) -> bool:
+        resolved = self._resolve_theme_name(name)
+        if not resolved or resolved not in self.themes:
+            return False
+        self.theme_name = resolved
+        self._theme_palette = self.themes[resolved]
+        self.dark_mode = self._theme_palette["dark"]
+        self.apply_theme()
+        if persist:
+            save_theme_name(resolved)
+        return True
+
+    def toggle_theme(self):
+        """Toggle between Dark and Light mode."""
+        if self.dark_mode:
+            self.set_theme("Paper")
+        else:
+            self.set_theme("Noir")
     
     def apply_theme(self):
         """Apply dark/light theme."""
         style = self.ttk.Style()
         style.theme_use('clam')
-        
-        if self.dark_mode:
-            bg_color = "#2A2A2A"
-            fg_color = "#E0E0E0"
-            input_bg = "#1E1E1E"
-            input_fg = "#FFFFFF"
-            accent_color = "#808080"
-            button_bg = "#333333"
-            button_fg = "#FFFFFF"
-            border_color = "#444444"
-            concept_color = "#81D4FA"
-            
-            # Global option database for consistency across all standard widgets
-            self.root.option_add("*Background", bg_color)
-            self.root.option_add("*Foreground", fg_color)
-            self.root.option_add("*Entry.Background", input_bg)
-            self.root.option_add("*Entry.Foreground", input_fg)
-            self.root.option_add("*Listbox.Background", input_bg)
-            self.root.option_add("*Listbox.Foreground", input_fg)
-            self.root.option_add("*Text.Background", bg_color)
-            self.root.option_add("*Text.Foreground", fg_color)
-            self.root.option_add("*Button.Background", button_bg)
-            self.root.option_add("*Button.Foreground", button_fg)
-            
-        else:
-            bg_color = "#FFFFFF"
-            fg_color = "#000000"
-            input_bg = "#F5F5F5"
-            input_fg = "#000000"
-            accent_color = "#666666"
-            button_bg = "#E0E0E0"
-            button_fg = "#000000"
-            border_color = "#CCCCCC"
-            concept_color = "#0277BD"
-            
-            # Global option database for Light mode
-            self.root.option_add("*Background", bg_color)
-            self.root.option_add("*Foreground", fg_color)
-            self.root.option_add("*Entry.Background", input_bg)
-            self.root.option_add("*Entry.Foreground", input_fg)
-            self.root.option_add("*Listbox.Background", input_bg)
-            self.root.option_add("*Listbox.Foreground", input_fg)
+        palette = self.themes.get(self.theme_name, self.themes["Noir"])
+        self._theme_palette = palette
+        self.dark_mode = palette["dark"]
+
+        bg_color = palette["bg"]
+        fg_color = palette["fg"]
+        input_bg = palette["input_bg"]
+        input_fg = palette["input_fg"]
+        accent_color = palette["accent"]
+        button_bg = palette["button_bg"]
+        button_fg = palette["button_fg"]
+        border_color = palette["border"]
+        concept_color = palette["concept"]
+
+        # Global option database for consistency across all standard widgets
+        self.root.option_add("*Background", bg_color)
+        self.root.option_add("*Foreground", fg_color)
+        self.root.option_add("*Entry.Background", input_bg)
+        self.root.option_add("*Entry.Foreground", input_fg)
+        self.root.option_add("*Listbox.Background", input_bg)
+        self.root.option_add("*Listbox.Foreground", input_fg)
+        self.root.option_add("*Text.Background", bg_color)
+        self.root.option_add("*Text.Foreground", fg_color)
+        self.root.option_add("*Button.Background", button_bg)
+        self.root.option_add("*Button.Foreground", button_fg)
 
         self.root.configure(bg=bg_color)
 
@@ -1097,13 +2051,13 @@ class ChatbotGUI:
             elif tag.endswith("_message") or "_message_" in tag:
                 role = "user" if tag.startswith("user") else "ai" if tag.startswith("ai") else "system"
                 self._configure_message_tag(tag, role)
+
+        if self.command_mode and self._terminal_menu_active:
+            self._render_current_command_menu()
     
     def _configure_message_tag(self, tag_name: str, role: str):
         """Configure styling for message border tags."""
-        if self.dark_mode:
-            border_bg = "#1E1E1E"
-        else:
-            border_bg = "#E0E0E0"
+        border_bg = self._theme_palette.get("bubble_bg", "#1E1E1E" if self.dark_mode else "#E0E0E0")
         
         if role == "ai":
             modern_font = ("Georgia", 11)
@@ -1126,7 +2080,7 @@ class ChatbotGUI:
         suggestions: List[str] = []
         text_lower = text.lower()
         
-        commands = ["/help", "/exit", "/clear", "/dark", "/model", "/status", "/response", "/links", "/api", "/forge"]
+        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/status", "/api", "/forge"]
         
         if text.startswith("/"):
             for cmd in commands:
@@ -1201,6 +2155,9 @@ class ChatbotGUI:
     
     def on_input_key(self, event):
         """Handle key release in input entry."""
+        if self.command_mode:
+            self.hide_autocomplete()
+            return
         if event.keysym in ["Up", "Down", "Tab", "Return", "Escape"]:
             return
         
@@ -1217,6 +2174,10 @@ class ChatbotGUI:
     
     def on_autocomplete_nav(self, event):
         """Handle Up/Down arrow navigation."""
+        if self.command_mode:
+            delta = -1 if event.keysym == "Up" else 1
+            self._command_menu_nav(delta)
+            return "break"
         if not self.autocomplete_active or not self.autocomplete_suggestions:
             return None
         
@@ -1611,11 +2572,72 @@ class ChatbotGUI:
     def on_clear(self):
         """Clear chat history."""
         self.history.clear()
+        self.query_history.clear()
+        clear_runtime_memory(reset_rag=False)
+        self._close_command_mode()
+        self.hide_autocomplete()
         self.chat_display.delete("1.0", self.tk.END)
-        self.update_status("History cleared")
+        self.update_status("History and memory cleared")
+
+    def on_app_close(self):
+        """Persist settings, clear runtime memory, and close the GUI."""
+        try:
+            save_theme_name(self.theme_name)
+        except Exception as e:
+            print(f"[GUI] Failed to save theme on close: {e}")
+        try:
+            self.history.clear()
+            self.query_history.clear()
+            clear_runtime_memory(reset_rag=True)
+            from chatbot.model_manager import ModelManager
+            ModelManager.close_all()
+        except Exception as e:
+            print(f"[GUI] Failed to clear runtime memory on close: {e}")
+        self.root.destroy()
     
     def show_help(self):
         """Show help dialog."""
+        help_content = """Available Commands:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  /help              Show this help menu
+  /exit, :q, quit    Quit the application
+  /clear             Clear chat history
+  /themes            Choose a theme
+  /model             Select different model
+  /status            Show system status
+  /api               Configure external API mode
+  /forge             Build a ZIM from local docs
+
+Current Mode: Chat Mode
+
+Mode Description:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CHAT MODE (Default): Full AI responses using RAG with detailed explanations and synthesis.
+
+Mouse Features:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • Highlight text and press Enter to auto-paste and query
+  • Ctrl+Click on a word to select and query it
+  • Click on article links to open full content
+
+Keyboard Shortcuts:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • Enter in input field: Send message
+  • Enter with text selected in chat: Auto-paste and send
+  • Ctrl+Click: Select word for query
+  • ↑↓ Arrow keys: Navigate autocomplete suggestions
+  • Tab: Select autocomplete suggestion
+  • Esc: Close dialogs
+"""
+
+        if getattr(self, "use_terminal_dialogs", False):
+            self.append_message("system", help_content)
+            return
+
         help_window = self.tk.Toplevel(self.root)
         help_window.title("Help & Settings")
         help_window.geometry("800x600")
@@ -1656,47 +2678,6 @@ class ChatbotGUI:
         )
         content_text.pack(fill=self.tk.BOTH, expand=True, padx=20, pady=10)
         
-        help_content = """Available Commands:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  /help              Show this help menu
-  /exit, :q, quit    Quit the application
-  /clear             Clear chat history
-  /dark              Toggle dark mode
-  /model             Select different model
-  /response          Switch to Response Mode (Full AI)
-  /links             Switch to Link Mode (Search Results)
-
-Current Mode: {current_mode}
-
-Mode Description:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-RESPONSE MODE (Default): Full AI responses using RAG with detailed explanations and synthesis.
-   Use /response command to switch to this mode.
-
-LINK MODE: Fast semantic search returns clickable links to relevant articles.
-   Like Reddit AI - quickly find sources without waiting for AI generation.
-   Use /links command to switch to this mode.
-
-Mouse Features:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  • Highlight text and press Enter to auto-paste and query
-  • Ctrl+Click on a word to select and query it
-  • Click on article links to open full content
-
-Keyboard Shortcuts:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  • Enter in input field: Send message
-  • Enter with text selected in chat: Auto-paste and send
-  • Ctrl+Click: Select word for query
-  • ↑↓ Arrow keys: Navigate autocomplete suggestions
-  • Tab: Select autocomplete suggestion
-  • Esc: Close dialogs
-""".format(current_mode="Link Mode" if self.link_mode else "Response Mode")
-        
         content_text.config(state=self.tk.NORMAL)
         content_text.insert("1.0", help_content)
         content_text.config(state=self.tk.DISABLED)
@@ -1726,6 +2707,8 @@ Keyboard Shortcuts:
         """Send message."""
         user_input = self.input_entry.get().strip()
         if not user_input:
+            if self.command_mode:
+                self._handle_command_input("")
             return
         
         if not user_input.startswith("/") and user_input not in {"help", "quit", "exit"}:
@@ -1744,38 +2727,44 @@ Keyboard Shortcuts:
             self.show_help()
             return
         if user_input.lower() in {"/exit", ":q", "quit", "exit"}:
-            self.root.quit()
+            self.on_app_close()
+            return
+        if self.command_mode:
+            self._handle_command_input(user_input)
             return
         if user_input.lower() == "/clear":
             self.on_clear()
             return
         if user_input.lower() == "/dark":
-            self.dark_mode = not self.dark_mode
-            self.apply_theme()
-            mode_text = "Dark mode enabled" if self.dark_mode else "Light mode enabled"
-            self.update_status(mode_text)
+            self.append_message("system", "The /dark command was removed. Use /themes.")
+            return
+        if user_input.lower().startswith("/themes"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 1:
+                self._enter_themes_mode()
+            else:
+                theme_name = parts[1].strip()
+                if not self.set_theme(theme_name):
+                    self.append_message("system", f"Unknown theme '{theme_name}'. Use /themes to pick.")
             return
         if user_input.lower() == "/model":
-            self.show_model_menu()
+            self._enter_model_mode()
             return
-        if user_input.lower() == "/response":
-            self.link_mode = False
-            self.root.title(f"Chatbot - {self.model} (Response Mode)")
-            self.append_message("system", "Switched to Response Mode")
-            return
-        if user_input.lower() == "/links":
-            self.link_mode = True
-            self.root.title(f"Chatbot - {self.model} (Link Mode)")
-            self.append_message("system", "Switched to Link Mode")
+        if user_input.lower() in {"/response", "/responce", "/links"}:
+            self.append_message("system", "This command was removed in public. Hermit now uses chat response mode only.")
             return
         if user_input.lower() == "/status":
             self.show_status_dialog()
             return
         if user_input.lower() in ["/api", "/connect"]:
-            self.show_api_config_dialog()
+            self._enter_api_mode()
             return
-        if user_input.lower() == "/forge":
-            self.show_forge_dialog()
+        if user_input.lower().startswith("/forge"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) > 1:
+                self._enter_forge_mode(parts[1].strip())
+            else:
+                self._enter_forge_mode()
             return
         
         # Add to history and get response
@@ -1817,22 +2806,27 @@ Keyboard Shortcuts:
                 if self.streaming_enabled:
                     accumulated: List[str] = []
                     for chunk in stream_chat(self.model, messages):
+                        follow_now = self._is_near_bottom()
                         accumulated.append(chunk)
                         self.chat_display.insert(insert_mark, chunk, ai_tag_name)
-                        self.chat_display.see(self.tk.END)
+                        if follow_now:
+                            self.chat_display.see(self.tk.END)
                         self.root.update_idletasks()
                     
                     assistant_reply = "".join(accumulated)
                 else:
+                    auto_follow = self._is_near_bottom()
                     assistant_reply = full_chat(self.model, messages)
                     self.chat_display.insert(insert_mark, assistant_reply, ai_tag_name)
+                    if auto_follow:
+                        self.chat_display.see(self.tk.END)
                 
                 # Padding is already present from the bubble, but let's ensure it's correct
                 # We reused the bubble structure which ends with padding + \n\n
                 # So we don't need to add it again unless we were in fallback mode.
                 
-                self.chat_display.see(self.tk.END)
-                self.chat_display.see(self.tk.END)
+                if self._is_near_bottom():
+                    self.chat_display.see(self.tk.END)
                 
                 if assistant_reply:
                     self.history.append(Message(role="assistant", content=assistant_reply))
@@ -1999,7 +2993,7 @@ Keyboard Shortcuts:
             f"KNOWLEDGE BASE (RAG): {rag_status}\n"
             f"{rag_detail}\n\n"
             f"GUI Mode: {'Link Search' if self.link_mode else 'Chat Response'}\n"
-            f"Theme: {'Dark' if self.dark_mode else 'Light'}"
+            f"Theme: {self.theme_name} ({'Dark' if self.dark_mode else 'Light'})"
         )
         
         self.messagebox.showinfo("System Status", msg)

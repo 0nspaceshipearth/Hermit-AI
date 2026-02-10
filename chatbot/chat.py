@@ -51,6 +51,19 @@ def _update_status(status: str):
             pass
 
 
+def clear_runtime_memory(reset_rag: bool = False) -> None:
+    """Clear in-process session caches (no disk persistence)."""
+    try:
+        from chatbot.rag.search import clear_title_cache
+        clear_title_cache()
+    except Exception:
+        pass
+
+    if reset_rag:
+        global _rag_system
+        _rag_system = None
+
+
 def stream_chat(model: str, messages: List[dict]) -> Iterable[str]:
     """Stream chat with local model."""
     debug_print(f"stream_chat called with model='{model}'")

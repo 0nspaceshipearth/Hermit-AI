@@ -40,6 +40,14 @@ def _normalize_query_for_cache(query: str) -> str:
 _title_cache: Dict[str, List[str]] = {}
 _title_cache_order: List[str] = []  # For LRU tracking
 
+
+def clear_title_cache() -> None:
+    """Clear in-memory title generation cache."""
+    global _title_cache, _title_cache_order
+    _title_cache.clear()
+    _title_cache_order.clear()
+
+
 class SearchModule:
     """
     Mixin for RAGSystem that handles core search functionality.

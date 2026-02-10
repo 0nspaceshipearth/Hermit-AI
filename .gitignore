@@ -4,9 +4,21 @@ __pycache__/
 *.zim
 shared_models/
 data/index/
+data/indices/
 *.log
 .DS_Store
 .github_deploy_key
 .github_deploy_key.pub
 test_data.csv
 test_pioneer_integration.py
+
+# Local environment or secret material
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Runtime-generated retrieval/index artifacts
+*.faiss
+*.pkl

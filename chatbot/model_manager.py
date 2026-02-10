@@ -59,11 +59,21 @@ def _format_size(size_bytes: int) -> str:
 
 class ProgressTqdm:
     """A tqdm-compatible wrapper that notifies the global callback."""
+    _progress_offset: float = 0.0
+    _progress_scale: float = 1.0
+    _default_desc: str = "Downloading"
+
+    @classmethod
+    def configure(cls, offset: float = 0.0, scale: float = 1.0, detail: str = "Downloading") -> None:
+        """Configure progress mapping for the next hf_hub_download call."""
+        cls._progress_offset = max(0.0, min(1.0, offset))
+        cls._progress_scale = max(0.0, min(1.0, scale))
+        cls._default_desc = detail or "Downloading"
+
     def __init__(self, *args, **kwargs):
         self._total = kwargs.get('total', 0)
         self._n = 0
-        self._desc = kwargs.get('desc', 'Downloading')
-        self._unit_scale = kwargs.get('unit_scale', False)
+        self._desc = kwargs.get('desc', self._default_desc)
         
         # Internal tqdm for terminal output
         if tqdm:
@@ -77,11 +87,9 @@ class ProgressTqdm:
             self._tqdm.update(n)
         
         if self._total and self._total > 0:
-            progress = self._n / self._total
-            # Update detail string with % and speed if possible
-            # But the GUI simple handles status, progress, detail.
-            # We want the progress bar to move!
-            _notify_progress("downloading", progress, self._desc)
+            shard_progress = min(1.0, self._n / self._total)
+            progress = self._progress_offset + (shard_progress * self._progress_scale)
+            _notify_progress("downloading", min(1.0, progress), self._desc)
 
     def set_description(self, desc, refresh=True):
         self._desc = desc
@@ -89,6 +97,11 @@ class ProgressTqdm:
             self._tqdm.set_description(desc, refresh)
 
     def close(self):
+        # Emit a final update for this shard/file based on actual bytes seen.
+        if self._total and self._total > 0:
+            shard_progress = min(1.0, self._n / self._total)
+            final_progress = self._progress_offset + (shard_progress * self._progress_scale)
+            _notify_progress("downloading", min(1.0, final_progress), self._desc)
         if self._tqdm:
             self._tqdm.close()
             
@@ -188,10 +201,6 @@ class ModelManager:
                                  match_found = True
                                  candidate_file = candidate
                                  break
-                        elif "pioneer" in repo_id.lower() and "pioneer" in candidate.lower():
-                             match_found = True
-                             candidate_file = candidate
-                             break
                     if match_found and candidate_file:
                         # [FIX] Verify all shards if it's a split file
                         import re
@@ -266,6 +275,23 @@ class ModelManager:
             model_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
             _notify_progress("downloading", 0.0, f"{model_name} ({size_str})")
             print(f"Downloading {model_name} ({size_str})...")
+
+            def _download_file(filename: str) -> str:
+                """Download one file with progress callback support when available."""
+                try:
+                    return hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=model_dir,
+                        tqdm_class=ProgressTqdm
+                    )
+                except TypeError:
+                    # Older huggingface_hub may not support tqdm_class.
+                    return hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=model_dir
+                    )
             
             # Download the model (handle potential splits)
             import re
@@ -279,13 +305,13 @@ class ModelManager:
                 final_path = None
                 for i in range(1, total_parts + 1):
                     shard_name = f"{base_name}-{i:05d}-of-{total_parts:05d}.gguf"
-                    _notify_progress("downloading", (i-1)/total_parts, f"Shard {i}/{total_parts}...")
+                    offset = (i - 1) / total_parts
+                    scale = 1.0 / total_parts
+                    detail = f"Shard {i}/{total_parts}: {model_name}"
+                    ProgressTqdm.configure(offset=offset, scale=scale, detail=detail)
+                    _notify_progress("downloading", offset, detail)
                     
-                    path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=shard_name,
-                        local_dir=model_dir
-                    )
+                    path = _download_file(shard_name)
                     if i == 1:
                         final_path = path
                 
@@ -293,11 +319,8 @@ class ModelManager:
                 return final_path
             else:
                 # Single file download
-                path = hf_hub_download(
-                    repo_id=repo_id, 
-                    filename=selected_file, 
-                    local_dir=model_dir
-                )
+                ProgressTqdm.configure(offset=0.0, scale=1.0, detail=f"{model_name} ({size_str})")
+                path = _download_file(selected_file)
                 
                 _notify_progress("ready", 1.0, size_str)
                 print(f"Model downloaded to: {path}")
@@ -313,17 +336,12 @@ class ModelManager:
             raise
 
     @classmethod
-    def get_model(cls, repo_id: str, n_ctx: int = 8192, n_gpu_layers: int = -1, local_only: bool = False) -> 'Llama':
+    def get_model(cls, repo_id: str, n_ctx: int = 8192, n_gpu_layers: int = -1) -> 'Llama':
         """
         Get or load a Llama model instance.
         Enforces single-model policy to prevent VRAM OOM.
         Uses 8192 context by default to accommodate RAG content.
         """
-        # GLOBAL GEMINI OVERRIDE
-        if not local_only and getattr(config, 'GLOBAL_GEMINI', False) and getattr(config, 'GOOGLE_API_KEY', None):
-             # Always return Gemini if global mode is on, unless local_only is explicitly requested
-             repo_id = config.MODEL_GEMINI
-             
         if repo_id in cls._instances:
             return cls._instances[repo_id]
             
@@ -373,36 +391,6 @@ class ModelManager:
                 cls._instances[repo_id] = client
                 _notify_progress("ready", 1.0, f"API: {config.API_MODEL_NAME}")
                 return client
-
-            # GEMINI MODE CHECK
-            if repo_id == getattr(config, 'MODEL_GEMINI', 'gemini-pro'):
-                print(f"Gemini Mode Enabled.")
-                google_key = getattr(config, 'GOOGLE_API_KEY', None)
-                if not google_key:
-                    # Try loading from keyring
-                    try:
-                        from chatbot.keyring import load_google_api_key
-                        saved = load_google_api_key()
-                        if saved:
-                            config.GOOGLE_API_KEY = saved
-                            google_key = saved
-                    except ImportError:
-                        pass
-                
-                if not google_key:
-                     # Fallback to local model if key missing
-                     print("No Google API Key found. Falling back to default local model.")
-                     if repo_id == config.MODEL_GEMINI:
-                         repo_id = config.DEFAULT_MODEL
-                         # Recurse with new repo_id
-                         return cls.get_model(repo_id, n_ctx, n_gpu_layers, local_only=True)
-
-                if google_key:
-                    from chatbot.gemini_client import GeminiClientWrapper
-                    client = GeminiClientWrapper(api_key=google_key, model_name=repo_id)
-                    cls._instances[repo_id] = client
-                    _notify_progress("ready", 1.0, "Gemini Ready")
-                    return client
 
             # Local model loading requires llama-cpp-python
             if Llama is None:

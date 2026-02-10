@@ -25,7 +25,7 @@ import libzim
 
 from chatbot.rag import RAGSystem, TextProcessor
 from chatbot import config
-from chatbot.chat import build_messages, stream_chat
+from chatbot.chat import build_messages, stream_chat, clear_runtime_memory
 from chatbot.models import Message
 
 class ChatbotCLI(cmd.Cmd):
@@ -55,6 +55,12 @@ class ChatbotCLI(cmd.Cmd):
             print("Some functionality may be limited.")
             
         self.history = []
+
+    def do_clear(self, arg):
+        """Clear in-session conversation memory."""
+        self.history.clear()
+        clear_runtime_memory(reset_rag=False)
+        print("Session memory cleared.")
 
     def do_search(self, arg):
         """Search for articles: search <query>"""
@@ -211,6 +217,8 @@ class ChatbotCLI(cmd.Cmd):
 
     def do_quit(self, arg):
         """Exit the CLI."""
+        self.history.clear()
+        clear_runtime_memory(reset_rag=True)
         print("Goodbye!")
         return True
         
@@ -252,6 +260,8 @@ class ChatbotCLI(cmd.Cmd):
         
     def do_EOF(self, arg):
         """Exit on Ctrl-D"""
+        self.history.clear()
+        clear_runtime_memory(reset_rag=True)
         print("")
         return True
 

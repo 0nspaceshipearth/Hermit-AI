@@ -33,7 +33,7 @@ DEFAULT_MODEL = MODEL_QWEN_3B   # Default for public release
 # DEFAULT_MODEL = MODEL_NVIDIA_8B  # Best quality, needs 6GB free VRAM
 STRICT_RAG_MODE = False
 MIN_ARTICLE_SCORE = 2.5
-DEBUG = True
+DEBUG = False
 
 # === TITLE GENERATION OPTIMIZATION ===
 # Tiny model for fast title generation (0.5B-1.5B recommended)
@@ -110,11 +110,6 @@ MAX_LINK_RESULTS = 10
 # Maximum characters of article text stored per search result.
 MAX_ARTICLE_TEXT_CHARS = 6000
 
-# === GOOGLE GEMINI STUBS (For ModelManager Compatibility) ===
-GOOGLE_API_KEY = None
-MODEL_GEMINI = "gemini-2.0-flash"
-GLOBAL_GEMINI = False
-
 SYSTEM_PROMPT = (
     "You are a helpful, thorough AI assistant. When provided with context, "
     "you carefully read ALL of it to find the most accurate and complete answer. "
@@ -143,4 +138,3 @@ MAX_EXPANSION_ITERATIONS = 2          # Limit expansion loops
 # Multi-Hop Resolution
 ENABLE_MULTI_HOP_RESOLUTION = True    # Toggle for multi-hop resolver
 MULTI_HOP_AMBIGUITY_THRESHOLD = 0.6   # Ambiguity level to trigger resolution
-
