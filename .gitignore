@@ -15,9 +15,11 @@ test_pioneer_integration.py
 # Local environment or secret material
 .env
 .env.*
+.hermit_api_key
 *.pem
 *.key
 *.crt
+*.restore
 
 # Runtime-generated retrieval/index artifacts
 *.faiss
