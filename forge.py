@@ -329,7 +329,7 @@ class ZIMHomePage(Item):
 <body>
     <h1>📚 {html.escape(self.title)}</h1>
     <p>This knowledge base contains <strong>{len(self.docs)}</strong> documents.</p>
-    <p>Created with <a href="https://github.com/imDelivered/Hermit-AI">Hermit Forge</a></p>
+    <p>Created with <a href="https://github.com/0nspaceshipearth/Hermit-AI">Hermit Forge</a></p>
     <hr>
     <h2>Documents</h2>
     <ul>

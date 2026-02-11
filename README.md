@@ -27,7 +27,7 @@ for details on how the architecture works, see [ARCHITECTURE.md](ARCHITECTURE.md
 ### setup
 
 ```bash
-git clone https://github.com/imDelivered/Hermit-AI.git
+git clone https://github.com/0nspaceshipearth/Hermit-AI.git
 cd Hermit-AI
 ./setup.sh
 ```
