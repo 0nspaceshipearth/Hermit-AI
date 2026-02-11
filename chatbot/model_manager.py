@@ -8,6 +8,12 @@ import os
 import sys
 import glob
 from typing import Optional, Dict, List, Callable
+
+# Force stable HTTP download path.
+# Some environments fail with Xet transport ("xet_get") even on valid repos.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
 from huggingface_hub import hf_hub_download, list_repo_files, try_to_load_from_cache
 try:
     from tqdm import tqdm
@@ -55,6 +61,18 @@ def _format_size(size_bytes: int) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} PB"
+
+
+def _is_xet_transport_error(exc: Exception) -> bool:
+    """Detect known hf-xet transport failures."""
+    text = str(exc).lower()
+    needles = (
+        "xet_get",
+        "hf_xet",
+        "cas service error",
+        "huggingface_hub.xet_get",
+    )
+    return any(n in text for n in needles)
 
 
 class ProgressTqdm:
@@ -292,6 +310,27 @@ class ModelManager:
                         filename=filename,
                         local_dir=model_dir
                     )
+                except Exception as e:
+                    # Retry path for known Xet transport failures.
+                    # This keeps downloads functional across mixed hf-xet environments.
+                    if _is_xet_transport_error(e):
+                        print("⚠️ Xet transport failed; retrying with HTTP-only mode...")
+                        os.environ["HF_HUB_DISABLE_XET"] = "1"
+                        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+                        try:
+                            return hf_hub_download(
+                                repo_id=repo_id,
+                                filename=filename,
+                                local_dir=model_dir,
+                                tqdm_class=ProgressTqdm
+                            )
+                        except TypeError:
+                            return hf_hub_download(
+                                repo_id=repo_id,
+                                filename=filename,
+                                local_dir=model_dir
+                            )
+                    raise
             
             # Download the model (handle potential splits)
             import re

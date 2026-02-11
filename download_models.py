@@ -4,6 +4,10 @@ import os
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Use stable Hugging Face HTTP downloads.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
 from chatbot import config
 from chatbot.model_manager import ModelManager
 

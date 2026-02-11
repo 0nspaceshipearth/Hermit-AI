@@ -69,6 +69,10 @@ grep -v "llama-cpp-python" requirements.txt > requirements_temp.txt
 ./venv/bin/pip install -r requirements_temp.txt 2>&1 | tee -a setup.log
 rm requirements_temp.txt
 
+# hf-xet can fail in some environments; use stable HTTP transport for HF downloads.
+./venv/bin/pip uninstall -y hf-xet >/dev/null 2>&1 || true
+echo "✓ Hugging Face transport configured (HTTP mode)"
+
 echo "[4.5/5] Installing llama-cpp-python..."
 if command -v nvidia-smi &> /dev/null; then
     echo "  -> NVIDIA GPU detected. Installing with CUDA support..."
@@ -91,6 +95,9 @@ fi
 # 5. Download Models
 echo "[5/6] Downloading AI Models..."
 echo "This may take a while depending on your internet connection."
+# Use stable Hugging Face HTTP download path (disable Xet/hf_transfer).
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_HF_TRANSFER=0
 # Ensure CUDA libraries from the venv are in the path
 for lib_dir in ./venv/lib/python3.12/site-packages/nvidia/*/lib; do
     if [ -d "$lib_dir" ]; then
