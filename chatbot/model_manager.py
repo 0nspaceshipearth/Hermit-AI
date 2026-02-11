@@ -7,6 +7,7 @@ Handles downloading GGUF models from Hugging Face and loading them via llama-cpp
 import os
 import sys
 import glob
+import time
 from typing import Optional, Dict, List, Callable
 import requests
 
@@ -88,39 +89,104 @@ def _manual_http_download(repo_id: str, filename: str, local_dir: str) -> str:
     tmp_path = f"{target_path}.part"
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
-    timeout = (10, 120)
-    downloaded = 0
-    total_bytes = 0
+    timeout = (10, 60)
+    max_retries = 3
     detail = ProgressTqdm._default_desc
 
-    try:
-        with requests.get(url, stream=True, allow_redirects=True, timeout=timeout) as response:
-            response.raise_for_status()
-            total_bytes = int(response.headers.get("content-length", "0") or 0)
-            if total_bytes > 0:
-                _notify_progress("downloading", ProgressTqdm._progress_offset, detail)
+    for attempt in range(1, max_retries + 1):
+        downloaded = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+        headers = {"Range": f"bytes={downloaded}-"} if downloaded > 0 else {}
+        write_mode = "ab" if downloaded > 0 else "wb"
+        total_bytes = 0
 
-            with open(tmp_path, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    downloaded += len(chunk)
+        try:
+            with requests.get(
+                url,
+                stream=True,
+                allow_redirects=True,
+                timeout=timeout,
+                headers=headers
+            ) as response:
+                if downloaded > 0 and response.status_code == 200:
+                    # Server ignored Range; restart from scratch.
+                    downloaded = 0
+                    write_mode = "wb"
+                response.raise_for_status()
 
-                    if total_bytes > 0:
-                        shard_progress = min(1.0, downloaded / total_bytes)
-                        progress = ProgressTqdm._progress_offset + (shard_progress * ProgressTqdm._progress_scale)
-                        _notify_progress("downloading", min(1.0, progress), detail)
+                content_range = response.headers.get("content-range")
+                content_length = int(response.headers.get("content-length", "0") or 0)
+                if content_range and "/" in content_range:
+                    try:
+                        total_bytes = int(content_range.rsplit("/", 1)[-1])
+                    except ValueError:
+                        total_bytes = 0
+                elif content_length > 0:
+                    total_bytes = downloaded + content_length
 
-        os.replace(tmp_path, target_path)
-        return target_path
-    except Exception:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-        raise
+                if total_bytes > 0:
+                    _notify_progress("downloading", ProgressTqdm._progress_offset, detail)
+                    print(
+                        f"  -> HTTP fallback download: {_format_size(downloaded)}"
+                        f"/{_format_size(total_bytes)}"
+                    )
+                else:
+                    print(f"  -> HTTP fallback download: {_format_size(downloaded)} downloaded")
+
+                last_log = time.time()
+                last_bytes = downloaded
+
+                with open(tmp_path, write_mode) as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+
+                        if total_bytes > 0:
+                            shard_progress = min(1.0, downloaded / total_bytes)
+                            progress = ProgressTqdm._progress_offset + (shard_progress * ProgressTqdm._progress_scale)
+                            _notify_progress("downloading", min(1.0, progress), detail)
+
+                        now = time.time()
+                        should_log = (now - last_log >= 10) or (downloaded - last_bytes >= 256 * 1024 * 1024)
+                        if should_log:
+                            if total_bytes > 0:
+                                pct = (downloaded / total_bytes) * 100.0
+                                print(
+                                    f"  -> HTTP fallback progress: {pct:.1f}% "
+                                    f"({_format_size(downloaded)}/{_format_size(total_bytes)})"
+                                )
+                            else:
+                                print(f"  -> HTTP fallback progress: {_format_size(downloaded)} downloaded")
+                            last_log = now
+                            last_bytes = downloaded
+
+            if total_bytes > 0 and downloaded < total_bytes:
+                raise IOError(
+                    f"Incomplete download for {filename}: got {downloaded}/{total_bytes} bytes"
+                )
+
+            os.replace(tmp_path, target_path)
+            print(
+                f"  -> HTTP fallback complete: {_format_size(downloaded)} "
+                f"saved to {target_path}"
+            )
+            return target_path
+
+        except Exception as e:
+            if attempt == max_retries:
+                if os.path.exists(tmp_path):
+                    print(
+                        f"⚠️ HTTP fallback stopped with partial file kept for resume: {tmp_path}"
+                    )
+                raise
+            print(
+                f"⚠️ HTTP fallback interrupted (attempt {attempt}/{max_retries}): {e}. "
+                "Retrying with resume..."
+            )
+            time.sleep(min(5 * attempt, 15))
+
+    raise RuntimeError(f"Failed to download {filename} after retries")
 
 
 class ProgressTqdm:
