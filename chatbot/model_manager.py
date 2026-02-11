@@ -8,13 +8,14 @@ import os
 import sys
 import glob
 from typing import Optional, Dict, List, Callable
+import requests
 
 # Force stable HTTP download path.
 # Some environments fail with Xet transport ("xet_get") even on valid repos.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
-from huggingface_hub import hf_hub_download, list_repo_files, try_to_load_from_cache
+from huggingface_hub import hf_hub_download, hf_hub_url, list_repo_files, try_to_load_from_cache
 try:
     from tqdm import tqdm
 except ImportError:
@@ -64,15 +65,62 @@ def _format_size(size_bytes: int) -> str:
 
 
 def _is_xet_transport_error(exc: Exception) -> bool:
-    """Detect known hf-xet transport failures."""
+    """Detect known Hugging Face transport/plugin failures."""
     text = str(exc).lower()
     needles = (
         "xet_get",
+        "http_get",
         "hf_xet",
         "cas service error",
         "huggingface_hub.xet_get",
+        "huggingface_hub.http_get",
+        "unknown argument(s)",
     )
     return any(n in text for n in needles)
+
+
+def _manual_http_download(repo_id: str, filename: str, local_dir: str) -> str:
+    """
+    Fallback direct download path that bypasses huggingface_hub transport plugins.
+    """
+    url = hf_hub_url(repo_id=repo_id, filename=filename)
+    target_path = os.path.join(local_dir, filename)
+    tmp_path = f"{target_path}.part"
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+    timeout = (10, 120)
+    downloaded = 0
+    total_bytes = 0
+    detail = ProgressTqdm._default_desc
+
+    try:
+        with requests.get(url, stream=True, allow_redirects=True, timeout=timeout) as response:
+            response.raise_for_status()
+            total_bytes = int(response.headers.get("content-length", "0") or 0)
+            if total_bytes > 0:
+                _notify_progress("downloading", ProgressTqdm._progress_offset, detail)
+
+            with open(tmp_path, "wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+
+                    if total_bytes > 0:
+                        shard_progress = min(1.0, downloaded / total_bytes)
+                        progress = ProgressTqdm._progress_offset + (shard_progress * ProgressTqdm._progress_scale)
+                        _notify_progress("downloading", min(1.0, progress), detail)
+
+        os.replace(tmp_path, target_path)
+        return target_path
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 class ProgressTqdm:
@@ -296,20 +344,24 @@ class ModelManager:
 
             def _download_file(filename: str) -> str:
                 """Download one file with progress callback support when available."""
+                def _hub_download() -> str:
+                    try:
+                        return hf_hub_download(
+                            repo_id=repo_id,
+                            filename=filename,
+                            local_dir=model_dir,
+                            tqdm_class=ProgressTqdm
+                        )
+                    except TypeError:
+                        # Older huggingface_hub may not support tqdm_class.
+                        return hf_hub_download(
+                            repo_id=repo_id,
+                            filename=filename,
+                            local_dir=model_dir
+                        )
+
                 try:
-                    return hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=model_dir,
-                        tqdm_class=ProgressTqdm
-                    )
-                except TypeError:
-                    # Older huggingface_hub may not support tqdm_class.
-                    return hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=model_dir
-                    )
+                    return _hub_download()
                 except Exception as e:
                     # Retry path for known Xet transport failures.
                     # This keeps downloads functional across mixed hf-xet environments.
@@ -318,18 +370,12 @@ class ModelManager:
                         os.environ["HF_HUB_DISABLE_XET"] = "1"
                         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
                         try:
-                            return hf_hub_download(
-                                repo_id=repo_id,
-                                filename=filename,
-                                local_dir=model_dir,
-                                tqdm_class=ProgressTqdm
-                            )
-                        except TypeError:
-                            return hf_hub_download(
-                                repo_id=repo_id,
-                                filename=filename,
-                                local_dir=model_dir
-                            )
+                            return _hub_download()
+                        except Exception as retry_error:
+                            if _is_xet_transport_error(retry_error):
+                                print("⚠️ huggingface_hub transport unavailable; falling back to direct HTTP download...")
+                                return _manual_http_download(repo_id=repo_id, filename=filename, local_dir=model_dir)
+                            raise
                     raise
             
             # Download the model (handle potential splits)

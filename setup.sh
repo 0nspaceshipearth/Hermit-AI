@@ -69,8 +69,8 @@ grep -v "llama-cpp-python" requirements.txt > requirements_temp.txt
 ./venv/bin/pip install -r requirements_temp.txt 2>&1 | tee -a setup.log
 rm requirements_temp.txt
 
-# hf-xet can fail in some environments; use stable HTTP transport for HF downloads.
-./venv/bin/pip uninstall -y hf-xet >/dev/null 2>&1 || true
+# hf-xet/hf_transfer can fail in some environments; use stable HTTP transport for HF downloads.
+./venv/bin/pip uninstall -y hf-xet hf_transfer >/dev/null 2>&1 || true
 echo "✓ Hugging Face transport configured (HTTP mode)"
 
 echo "[4.5/5] Installing llama-cpp-python..."
