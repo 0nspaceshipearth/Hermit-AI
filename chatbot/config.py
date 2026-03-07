@@ -93,6 +93,26 @@ ADAPTIVE_THRESHOLD = 3.0  # Lowered to trigger fewer expansions when data is pre
 # Global Context Window Configuration
 DEFAULT_CONTEXT_SIZE = 8192
 
+# === ADAPTIVE FINAL GENERATION ===
+# Generation lane: auto | sprint | cruise | beast
+FINAL_GENERATION_MODE = "auto"
+
+# Per-lane context targets (used for final answer path)
+FINAL_SPRINT_CONTEXT_SIZE = 4096
+FINAL_CRUISE_CONTEXT_SIZE = 8192
+FINAL_BEAST_CONTEXT_SIZE = 12288
+
+# Per-lane max token budgets
+FINAL_SPRINT_MAX_TOKENS = 160
+FINAL_CRUISE_MAX_TOKENS = 320
+FINAL_BEAST_MAX_TOKENS = 640
+
+# Prompt budgeting: when facts exist, prefer compact fact-first context
+FINAL_FACTS_FIRST = True
+FINAL_MAX_SOURCE_CHARS_SPRINT = 2500
+FINAL_MAX_SOURCE_CHARS_CRUISE = 7000
+FINAL_MAX_SOURCE_CHARS_BEAST = 12000
+
 # === RETRIEVAL CONSTANTS ===
 # Maximum characters of RAG context to inject into the system prompt.
 # ~2500 tokens, leaves headroom in an 8K context window.
