@@ -1412,6 +1412,250 @@ class ChatbotGUI:
                 
         return unique_models
     
+    def _get_joint_tree_slots(self) -> List[Tuple[str, str, str]]:
+        """Return editable runtime model slots for the /tree view."""
+        return [
+            ("final", "Final synthesis", "DEFAULT_MODEL"),
+            ("entity", "Entity extraction", "ENTITY_JOINT_MODEL"),
+            ("scorer", "Article scoring", "SCORER_JOINT_MODEL"),
+            ("filter", "Chunk filtering", "FILTER_JOINT_MODEL"),
+            ("fact", "Fact extraction", "FACT_JOINT_MODEL"),
+            ("refine", "Refinement", "REFINEMENT_JOINT_MODEL"),
+            ("multi", "Multi-hop reasoning", "MULTI_HOP_JOINT_MODEL"),
+            ("compare", "Comparison synthesis", "COMPARISON_JOINT_MODEL"),
+        ]
+
+    def _set_runtime_model_slot(self, config_attr: str, model_name: str):
+        """Apply a model selection to a runtime config slot."""
+        old_value = getattr(config, config_attr, None)
+        setattr(config, config_attr, model_name)
+
+        if config_attr == "DEFAULT_MODEL":
+            self.model = model_name
+            self.root.title(f"Chatbot - {model_name} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+            self.update_status(f"Model: {model_name}")
+
+        try:
+            from chatbot.model_manager import ModelManager
+            ModelManager.close_all()
+        except Exception:
+            pass
+
+        pretty_name = config_attr.replace("_MODEL", "").replace("_", " ").title()
+        self.append_message("system", f"{pretty_name}: {old_value} → {model_name}")
+
+    def show_system_tree(self):
+        """Show a schematic tree of the runtime with expandable model selectors."""
+        models = self.get_installed_models()
+        if not models:
+            self.messagebox.showwarning("No Models", "No models found in config.")
+            return
+
+        model_names = [name for name, _ in models]
+        display_map = {name: self._format_model_display(name) for name in model_names}
+
+        window = self.tk.Toplevel(self.root)
+        window.title("Hermit System Tree")
+        window.geometry("760x680")
+        window.transient(self.root)
+        window.grab_set()
+
+        bg_color = "#161616" if self.dark_mode else "#FAFAFA"
+        panel_bg = "#202020" if self.dark_mode else "#FFFFFF"
+        line_color = "#7AA2F7" if self.dark_mode else "#375A9E"
+        text_color = "#ECECEC" if self.dark_mode else "#202020"
+        muted_color = "#B0B0B0" if self.dark_mode else "#606060"
+
+        window.configure(bg=bg_color)
+
+        outer = self.tk.Frame(window, bg=bg_color)
+        outer.pack(fill=self.tk.BOTH, expand=True, padx=12, pady=12)
+
+        title = self.tk.Label(
+            outer,
+            text="Hermit Runtime Tree",
+            font=("Arial", 15, "bold"),
+            bg=bg_color,
+            fg=text_color,
+        )
+        title.pack(anchor="w")
+
+        subtitle = self.tk.Label(
+            outer,
+            text="Click a model button to expand the installed-model list for that stage.",
+            font=("Arial", 10),
+            bg=bg_color,
+            fg=muted_color,
+        )
+        subtitle.pack(anchor="w", pady=(2, 10))
+
+        container = self.tk.Frame(outer, bg=panel_bg, highlightthickness=1, highlightbackground=line_color)
+        container.pack(fill=self.tk.BOTH, expand=True)
+
+        header = self.tk.Label(
+            container,
+            text="USER QUERY\n  ↓\nJOINT PIPELINE\n  ↓\nFINAL SYNTHESIS",
+            justify="left",
+            font=("Courier New", 11, "bold"),
+            bg=panel_bg,
+            fg=line_color,
+            padx=14,
+            pady=12,
+        )
+        header.pack(anchor="w")
+
+        sections: List[dict] = []
+
+        def build_section(slot_id: str, label: str, config_attr: str):
+            current_model = getattr(config, config_attr, config.DEFAULT_MODEL)
+
+            section_frame = self.tk.Frame(container, bg=panel_bg)
+            section_frame.pack(fill=self.tk.X, padx=14, pady=6)
+
+            top_row = self.tk.Frame(section_frame, bg=panel_bg)
+            top_row.pack(fill=self.tk.X)
+
+            stage_label = self.tk.Label(
+                top_row,
+                text=f"├─ {label}",
+                font=("Courier New", 11),
+                bg=panel_bg,
+                fg=text_color,
+                anchor="w",
+            )
+            stage_label.pack(side=self.tk.LEFT, fill=self.tk.X, expand=True)
+
+            model_button = self.tk.Button(
+                top_row,
+                text=display_map.get(current_model, current_model),
+                font=("Arial", 10, "bold"),
+                bg="#2B2B2B" if self.dark_mode else "#EAEAEA",
+                fg=text_color,
+                activebackground="#3B3B3B" if self.dark_mode else "#DCDCDC",
+                activeforeground=text_color,
+                relief=self.tk.RAISED,
+                padx=10,
+                pady=4,
+            )
+            model_button.pack(side=self.tk.RIGHT)
+
+            dropdown_frame = self.tk.Frame(section_frame, bg=panel_bg)
+            dropdown_visible = {"value": False}
+
+            listbox_frame = self.tk.Frame(dropdown_frame, bg=panel_bg)
+            listbox_frame.pack(fill=self.tk.X, padx=(28, 0), pady=(6, 0))
+
+            model_listbox = self.tk.Listbox(
+                listbox_frame,
+                height=min(6, max(3, len(model_names))),
+                activestyle="none",
+                exportselection=False,
+                font=("Arial", 10),
+                bg="#111111" if self.dark_mode else "#FFFFFF",
+                fg=text_color,
+                selectbackground=line_color,
+                selectforeground="#FFFFFF",
+                relief=self.tk.FLAT,
+                highlightthickness=1,
+                highlightbackground=line_color,
+            )
+            model_listbox.pack(side=self.tk.LEFT, fill=self.tk.X, expand=True)
+
+            scrollbar = self.ttk.Scrollbar(listbox_frame, orient=self.tk.VERTICAL, command=model_listbox.yview)
+            scrollbar.pack(side=self.tk.RIGHT, fill=self.tk.Y)
+            model_listbox.config(yscrollcommand=scrollbar.set)
+
+            for idx, model_name in enumerate(model_names):
+                model_listbox.insert(self.tk.END, display_map.get(model_name, model_name))
+                if model_name == current_model:
+                    model_listbox.selection_set(idx)
+                    model_listbox.see(idx)
+
+            action_row = self.tk.Frame(dropdown_frame, bg=panel_bg)
+            action_row.pack(fill=self.tk.X, padx=(28, 0), pady=(6, 0))
+
+            def apply_selection():
+                selection = model_listbox.curselection()
+                if not selection:
+                    return
+                chosen = model_names[selection[0]]
+                self._set_runtime_model_slot(config_attr, chosen)
+                model_button.config(text=display_map.get(chosen, chosen))
+                toggle_dropdown(force=False)
+
+            apply_btn = self.tk.Button(
+                action_row,
+                text="Apply",
+                command=apply_selection,
+                bg="#355E3B" if self.dark_mode else "#CFE8D1",
+                fg="#FFFFFF" if self.dark_mode else "#17351C",
+                activebackground="#3F7247" if self.dark_mode else "#B9DDBD",
+                relief=self.tk.RAISED,
+                padx=8,
+            )
+            apply_btn.pack(side=self.tk.LEFT)
+
+            cancel_btn = self.tk.Button(
+                action_row,
+                text="Close",
+                command=lambda: toggle_dropdown(force=False),
+                bg="#4A3B3B" if self.dark_mode else "#E9D6D6",
+                fg=text_color,
+                activebackground="#5A4A4A" if self.dark_mode else "#DFC6C6",
+                relief=self.tk.RAISED,
+                padx=8,
+            )
+            cancel_btn.pack(side=self.tk.LEFT, padx=(6, 0))
+
+            section = {
+                "slot_id": slot_id,
+                "frame": dropdown_frame,
+                "visible": dropdown_visible,
+            }
+            sections.append(section)
+
+            def toggle_dropdown(force: Optional[bool] = None):
+                desired = (not dropdown_visible["value"]) if force is None else bool(force)
+                for other in sections:
+                    if other["slot_id"] != slot_id and other["visible"]["value"]:
+                        other["frame"].pack_forget()
+                        other["visible"]["value"] = False
+                if desired:
+                    dropdown_frame.pack(fill=self.tk.X)
+                    dropdown_visible["value"] = True
+                else:
+                    dropdown_frame.pack_forget()
+                    dropdown_visible["value"] = False
+
+            model_button.config(command=toggle_dropdown)
+            model_listbox.bind("<Double-Button-1>", lambda _event: apply_selection())
+
+        for slot_id, label, config_attr in self._get_joint_tree_slots():
+            build_section(slot_id, label, config_attr)
+
+        footer = self.tk.Label(
+            outer,
+            text="Changes apply immediately for this running session. Loaded models are flushed so the new routing takes effect cleanly.",
+            font=("Arial", 9),
+            bg=bg_color,
+            fg=muted_color,
+            justify="left",
+        )
+        footer.pack(anchor="w", pady=(10, 8))
+
+        close_btn = self.tk.Button(
+            outer,
+            text="Close",
+            command=window.destroy,
+            bg="#2B2B2B" if self.dark_mode else "#EAEAEA",
+            fg=text_color,
+            activebackground="#3B3B3B" if self.dark_mode else "#DCDCDC",
+            relief=self.tk.RAISED,
+            padx=14,
+            pady=5,
+        )
+        close_btn.pack(anchor="e")
+
     def show_model_menu(self):
         """Show model selection menu."""
         models = self.get_installed_models()
@@ -2080,7 +2324,7 @@ class ChatbotGUI:
         suggestions: List[str] = []
         text_lower = text.lower()
         
-        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/status", "/api", "/forge"]
+        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/forge"]
         
         if text.startswith("/"):
             for cmd in commands:
@@ -2605,6 +2849,7 @@ class ChatbotGUI:
   /clear             Clear chat history
   /themes            Choose a theme
   /model             Select different model
+  /tree              Open model/joint system tree
   /status            Show system status
   /api               Configure external API mode
   /forge             Build a ZIM from local docs
@@ -2749,6 +2994,9 @@ Keyboard Shortcuts:
             return
         if user_input.lower() == "/model":
             self._enter_model_mode()
+            return
+        if user_input.lower() == "/tree":
+            self.show_system_tree()
             return
         if user_input.lower() in {"/response", "/responce", "/links"}:
             self.append_message("system", "This command was removed in public. Hermit now uses chat response mode only.")

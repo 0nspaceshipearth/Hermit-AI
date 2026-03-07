@@ -62,6 +62,28 @@ class ChatbotCLI(cmd.Cmd):
         clear_runtime_memory(reset_rag=False)
         print("Session memory cleared.")
 
+    def do_tree(self, arg):
+        """Show the current runtime model tree."""
+        slots = [
+            ("Final synthesis", "DEFAULT_MODEL"),
+            ("Entity extraction", "ENTITY_JOINT_MODEL"),
+            ("Article scoring", "SCORER_JOINT_MODEL"),
+            ("Chunk filtering", "FILTER_JOINT_MODEL"),
+            ("Fact extraction", "FACT_JOINT_MODEL"),
+            ("Refinement", "REFINEMENT_JOINT_MODEL"),
+            ("Multi-hop reasoning", "MULTI_HOP_JOINT_MODEL"),
+            ("Comparison synthesis", "COMPARISON_JOINT_MODEL"),
+        ]
+        print("\nHermit Runtime Tree")
+        print("===================")
+        print("User Query")
+        print("  ├─ Entity / Score / Filter")
+        print("  ├─ Fact / Refine / Multi-hop / Compare")
+        print("  └─ Final synthesis\n")
+        for label, attr in slots:
+            print(f"- {label}: {getattr(config, attr, '(unset)')}")
+        print("")
+
     def do_search(self, arg):
         """Search for articles: search <query>"""
         if not arg:
