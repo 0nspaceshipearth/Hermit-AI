@@ -4,11 +4,13 @@ Model Manager for Local Inference.
 Handles downloading GGUF models from Hugging Face and loading them via llama-cpp-python.
 """
 
-import os
-import sys
 import glob
+import os
+import struct
+import subprocess
 import time
-from typing import Optional, Dict, List, Callable
+from functools import lru_cache
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 # Force stable HTTP download path.
@@ -22,9 +24,13 @@ try:
 except ImportError:
     tqdm = None
 try:
-    from llama_cpp import Llama
+    import llama_cpp
+    from llama_cpp import Llama, LLAMA_SPLIT_MODE_LAYER, llama_supports_gpu_offload
 except ImportError:
+    llama_cpp = None
     Llama = None
+    LLAMA_SPLIT_MODE_LAYER = 1
+    llama_supports_gpu_offload = None
     print("WARNING: llama-cpp-python not installed. Local inference will fail.")
 
 from chatbot import config
@@ -243,10 +249,418 @@ class ProgressTqdm:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+
+FAST_QUANT_PREFERENCES = [
+    "Q4_K_M",
+    "Q4_K_S",
+    "Q5_K_M",
+    "Q5_K_S",
+    "Q6_K",
+    "Q8_0",
+    "Q4_0",
+    "F16",
+]
+
+_GGUF_SCALAR_FORMATS = {
+    0: "<B",   # uint8
+    1: "<b",   # int8
+    2: "<H",   # uint16
+    3: "<h",   # int16
+    4: "<I",   # uint32
+    5: "<i",   # int32
+    6: "<f",   # float32
+    7: "<?",   # bool
+    10: "<Q",  # uint64
+    11: "<q",  # int64
+    12: "<d",  # float64
+}
+
+_KNOWN_UNSUPPORTED_ARCH_HINTS = {
+    "qwen35moe": (
+        "This GGUF uses the qwen35moe architecture. The bundled llama-cpp-python "
+        "runtime cannot load it in embedded mode. Use Hermit's API mode with an "
+        "external backend that supports Qwen 3.5 MoE, or rebuild llama-cpp-python "
+        "against a newer llama.cpp."
+    ),
+}
+
+
+def _read_exact(handle, size: int) -> bytes:
+    data = handle.read(size)
+    if len(data) != size:
+        raise EOFError("Unexpected end of GGUF file")
+    return data
+
+
+def _read_u32(handle) -> int:
+    return struct.unpack("<I", _read_exact(handle, 4))[0]
+
+
+def _read_u64(handle) -> int:
+    return struct.unpack("<Q", _read_exact(handle, 8))[0]
+
+
+def _read_gguf_string(handle) -> str:
+    length = _read_u64(handle)
+    if length == 0:
+        return ""
+    return _read_exact(handle, length).decode("utf-8", errors="replace")
+
+
+def _skip_gguf_value(handle, value_type: int) -> None:
+    if value_type == 8:
+        length = _read_u64(handle)
+        handle.seek(length, os.SEEK_CUR)
+        return
+
+    if value_type == 9:
+        element_type = _read_u32(handle)
+        count = _read_u64(handle)
+        if element_type in _GGUF_SCALAR_FORMATS:
+            handle.seek(struct.calcsize(_GGUF_SCALAR_FORMATS[element_type]) * count, os.SEEK_CUR)
+            return
+        for _ in range(count):
+            _skip_gguf_value(handle, element_type)
+        return
+
+    fmt = _GGUF_SCALAR_FORMATS.get(value_type)
+    if fmt is None:
+        raise ValueError(f"Unsupported GGUF value type: {value_type}")
+    handle.seek(struct.calcsize(fmt), os.SEEK_CUR)
+
+
+def _read_gguf_value(handle, value_type: int) -> Any:
+    if value_type == 8:
+        return _read_gguf_string(handle)
+
+    if value_type == 9:
+        element_type = _read_u32(handle)
+        count = _read_u64(handle)
+        if element_type in _GGUF_SCALAR_FORMATS:
+            size = struct.calcsize(_GGUF_SCALAR_FORMATS[element_type])
+            handle.seek(size * count, os.SEEK_CUR)
+            return None
+        values = []
+        for _ in range(count):
+            values.append(_read_gguf_value(handle, element_type))
+        return values
+
+    fmt = _GGUF_SCALAR_FORMATS.get(value_type)
+    if fmt is None:
+        raise ValueError(f"Unsupported GGUF value type: {value_type}")
+    return struct.unpack(fmt, _read_exact(handle, struct.calcsize(fmt)))[0]
+
+
+@lru_cache(maxsize=64)
+def _inspect_gguf_metadata(model_path: str) -> Dict[str, Any]:
+    """Read a few useful GGUF metadata keys without loading the full model."""
+    wanted = {"general.architecture", "general.name", "general.size_label"}
+    metadata: Dict[str, Any] = {}
+
+    with open(model_path, "rb") as handle:
+        if _read_exact(handle, 4) != b"GGUF":
+            raise ValueError(f"Not a GGUF file: {model_path}")
+
+        version = _read_u32(handle)
+        if version < 2:
+            raise ValueError(f"Unsupported GGUF version {version} in {model_path}")
+
+        _ = _read_u64(handle)  # tensor_count
+        kv_count = _read_u64(handle)
+        architecture: Optional[str] = None
+
+        for _ in range(kv_count):
+            key = _read_gguf_string(handle)
+            value_type = _read_u32(handle)
+
+            if architecture and key in {f"{architecture}.block_count", f"{architecture}.context_length"}:
+                metadata[key] = _read_gguf_value(handle, value_type)
+            elif key in wanted:
+                value = _read_gguf_value(handle, value_type)
+                metadata[key] = value
+                if key == "general.architecture" and isinstance(value, str):
+                    architecture = value
+                    wanted.update({f"{architecture}.block_count", f"{architecture}.context_length"})
+            else:
+                _skip_gguf_value(handle, value_type)
+
+            if wanted.issubset(metadata.keys()):
+                break
+
+    return metadata
+
+
+def _detect_gpu_inventory() -> List[Dict[str, Any]]:
+    """Return visible NVIDIA GPUs with current free VRAM when available."""
+    query = [
+        "nvidia-smi",
+        "--query-gpu=index,memory.total,memory.free,name",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(
+            query,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        gpus: List[Dict[str, Any]] = []
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in line.split(",", 3)]
+            if len(parts) != 4:
+                continue
+            index_str, total_str, free_str, name = parts
+            gpus.append(
+                {
+                    "index": int(index_str),
+                    "memory_total_gb": float(total_str) / 1024.0,
+                    "memory_free_gb": float(free_str) / 1024.0,
+                    "name": name,
+                }
+            )
+        if gpus:
+            return gpus
+    except Exception:
+        pass
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            gpus = []
+            for index in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(index)
+                free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+                gpus.append(
+                    {
+                        "index": index,
+                        "memory_total_gb": total_bytes / (1024 ** 3),
+                        "memory_free_gb": free_bytes / (1024 ** 3),
+                        "name": props.name,
+                    }
+                )
+            return gpus
+    except Exception:
+        pass
+
+    return []
+
+
+@lru_cache(maxsize=1)
+def _llama_gpu_offload_enabled() -> bool:
+    if llama_supports_gpu_offload is None:
+        return False
+    try:
+        return bool(llama_supports_gpu_offload())
+    except Exception:
+        return False
+
+
+def _recommended_contexts(requested_n_ctx: int, file_size_gb: float, trained_ctx: int) -> List[int]:
+    contexts = [requested_n_ctx]
+    if file_size_gb >= 18.0:
+        contexts.extend([6144, 4096, 3072, 2048])
+    elif file_size_gb >= 10.0:
+        contexts.extend([6144, 4096])
+
+    deduped: List[int] = []
+    seen = set()
+    for ctx in contexts:
+        effective_ctx = ctx
+        if trained_ctx > 0:
+            effective_ctx = min(effective_ctx, trained_ctx)
+        if effective_ctx < 512:
+            continue
+        if effective_ctx not in seen:
+            seen.add(effective_ctx)
+            deduped.append(effective_ctx)
+    return deduped or [requested_n_ctx]
+
+
+def _reserve_vram_per_gpu(n_ctx: int) -> float:
+    return 1.0 + min(2.0, (n_ctx / 4096.0) * 0.6)
+
+
+def _compute_tensor_split(gpus: List[Dict[str, Any]], n_ctx: int) -> Optional[List[float]]:
+    if len(gpus) < 2:
+        return None
+
+    reserve = _reserve_vram_per_gpu(n_ctx)
+    usable = [max(0.0, gpu["memory_free_gb"] - reserve) for gpu in gpus]
+    total_usable = sum(usable)
+    if total_usable <= 0:
+        return None
+    return [value / total_usable for value in usable]
+
+
+def _recommend_gpu_layers(
+    file_size_gb: float,
+    total_layers: int,
+    gpus: List[Dict[str, Any]],
+    n_ctx: int,
+    requested_n_gpu_layers: int,
+) -> int:
+    if requested_n_gpu_layers >= 0:
+        return requested_n_gpu_layers
+
+    if not gpus:
+        return 0
+
+    reserve = _reserve_vram_per_gpu(n_ctx)
+    usable_total = sum(max(0.0, gpu["memory_free_gb"] - reserve) for gpu in gpus)
+    if usable_total <= 0:
+        return 0
+
+    if usable_total >= (file_size_gb + 0.5):
+        return -1
+
+    gb_per_layer = file_size_gb / max(total_layers, 1)
+    candidate_layers = int(usable_total / max(gb_per_layer, 0.01))
+    return max(0, min(total_layers, candidate_layers))
+
+
+def _recommended_batch_sizes(file_size_gb: float, n_ctx: int) -> Tuple[int, int]:
+    if file_size_gb >= 12.0:
+        target_n_batch = int(getattr(config, "LLAMA_LARGE_MODEL_N_BATCH", 768))
+        target_n_ubatch = int(getattr(config, "LLAMA_LARGE_MODEL_N_UBATCH", target_n_batch))
+    else:
+        target_n_batch = int(getattr(config, "LLAMA_SMALL_MODEL_N_BATCH", 2048))
+        target_n_ubatch = int(getattr(config, "LLAMA_SMALL_MODEL_N_UBATCH", 1024))
+
+    tuned_n_batch = max(64, min(int(n_ctx), target_n_batch))
+    tuned_n_ubatch = max(64, min(tuned_n_batch, target_n_ubatch))
+    return tuned_n_batch, tuned_n_ubatch
+
+
+def _build_load_candidates(
+    file_size_gb: float,
+    total_layers: int,
+    gpus: List[Dict[str, Any]],
+    requested_n_ctx: int,
+    requested_n_gpu_layers: int,
+    trained_ctx: int,
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    gpu_enabled = _llama_gpu_offload_enabled() and bool(gpus)
+    contexts = _recommended_contexts(requested_n_ctx, file_size_gb, trained_ctx)
+
+    if not gpu_enabled:
+        cpu_ctx = contexts[0]
+        cpu_n_batch, cpu_n_ubatch = _recommended_batch_sizes(8.0, cpu_ctx)
+        return [
+            {
+                "n_ctx": cpu_ctx,
+                "n_gpu_layers": 0,
+                "n_batch": max(64, min(cpu_n_batch, 512)),
+                "n_ubatch": max(64, min(cpu_n_ubatch, 256)),
+                "flash_attn": False,
+                "offload_kqv": False,
+                "op_offload": False,
+                "split_mode": LLAMA_SPLIT_MODE_LAYER,
+                "tensor_split": None,
+                "use_mmap": True,
+                "desc": f"{cpu_ctx} ctx / CPU only",
+                "main_gpu": 0,
+                "gpu_summary": "CPU only",
+                "hide_gpu": True,
+            }
+        ]
+
+    for index, ctx in enumerate(contexts):
+        n_batch, n_ubatch = _recommended_batch_sizes(file_size_gb, ctx)
+        tensor_split = _compute_tensor_split(gpus, ctx) if gpu_enabled else None
+        candidate_layers = _recommend_gpu_layers(
+            file_size_gb=file_size_gb,
+            total_layers=total_layers,
+            gpus=gpus if gpu_enabled else [],
+            n_ctx=ctx,
+            requested_n_gpu_layers=requested_n_gpu_layers,
+        )
+
+        desc = f"{ctx} ctx / {'all' if candidate_layers == -1 else candidate_layers} GPU layers"
+        candidates.append(
+            {
+                "n_ctx": ctx,
+                "n_gpu_layers": candidate_layers if gpu_enabled else 0,
+                "n_batch": n_batch,
+                "n_ubatch": n_ubatch,
+                "flash_attn": gpu_enabled,
+                "offload_kqv": gpu_enabled,
+                "op_offload": gpu_enabled,
+                "split_mode": LLAMA_SPLIT_MODE_LAYER,
+                "tensor_split": tensor_split,
+                "use_mmap": True,
+                "desc": desc,
+                "main_gpu": max(gpus, key=lambda item: item["memory_free_gb"])["index"] if gpu_enabled else 0,
+                "gpu_summary": ", ".join(
+                    f"GPU{gpu['index']} {gpu['memory_free_gb']:.1f}/{gpu['memory_total_gb']:.1f}GB"
+                    for gpu in gpus
+                ) if gpu_enabled else "CPU only",
+            }
+        )
+
+        if gpu_enabled and index == 0 and candidate_layers not in (-1, 0):
+            safe_layers = max(0, candidate_layers - 6)
+            candidates.append(
+                {
+                    "n_ctx": ctx,
+                    "n_gpu_layers": safe_layers,
+                    "n_batch": max(64, min(n_batch, 512)),
+                    "n_ubatch": max(64, min(n_ubatch, 256)),
+                    "flash_attn": True,
+                    "offload_kqv": True,
+                    "op_offload": True,
+                    "split_mode": LLAMA_SPLIT_MODE_LAYER,
+                    "tensor_split": tensor_split,
+                    "use_mmap": index == 0,
+                    "desc": f"{ctx} ctx / safe fallback ({safe_layers} GPU layers)",
+                    "main_gpu": max(gpus, key=lambda item: item["memory_free_gb"])["index"],
+                    "gpu_summary": ", ".join(
+                        f"GPU{gpu['index']} {gpu['memory_free_gb']:.1f}/{gpu['memory_total_gb']:.1f}GB"
+                        for gpu in gpus
+                    ),
+                }
+            )
+
+        if len(candidates) >= 4:
+            break
+
+    cpu_ctx = min(contexts[-1], requested_n_ctx)
+    cpu_n_batch, cpu_n_ubatch = _recommended_batch_sizes(8.0, cpu_ctx)
+    candidates.append(
+        {
+            "n_ctx": cpu_ctx,
+            "n_gpu_layers": 0,
+            "n_batch": max(64, min(cpu_n_batch, 512)),
+            "n_ubatch": max(64, min(cpu_n_ubatch, 256)),
+            "flash_attn": False,
+            "offload_kqv": False,
+            "op_offload": False,
+            "split_mode": LLAMA_SPLIT_MODE_LAYER,
+            "tensor_split": None,
+            "use_mmap": True,
+            "desc": f"{cpu_ctx} ctx / CPU only",
+            "main_gpu": 0,
+            "gpu_summary": "CPU only",
+            "hide_gpu": True,
+        }
+    )
+    return candidates
+
 class ModelManager:
     """Singleton manager for local LLM models."""
-    
-    _instances: Dict[str, 'Llama'] = {}
+
+    _instances: Dict[str, Any] = {}
+    _active_model: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _is_large_model_id(model_id: str) -> bool:
+        lower = (model_id or "").lower()
+        return any(marker in lower for marker in ("32b", "34b", "70b", "72b", "405b"))
     
     @staticmethod
     def ensure_model_path(repo_id: str) -> str:
@@ -268,8 +682,8 @@ class ModelManager:
         
         print(f"Checking model availability for: {repo_id}")
         
-        # Search strategy: Q5_K_M > Q4_K_M > Q8_0 > Q4_0
-        preferences = ["Q5_K_M", "Q4_K_M", "Q8_0", "Q4_0", "F16"]
+        # Speed-first quant preference. Large models are much more usable at Q4 than Q5.
+        preferences = FAST_QUANT_PREFERENCES
         
         # 0. DIRECT FILE CHECK (Fast Path for manually downloaded models)
         # If repo_id looks like a filename (ends in .gguf) and exists, just use it.
@@ -487,59 +901,38 @@ class ModelManager:
             raise
 
     @classmethod
-    def get_model(cls, repo_id: str, n_ctx: int = 8192, n_gpu_layers: int = -1) -> 'Llama':
+    def get_model(cls, repo_id: str, n_ctx: int = 8192, n_gpu_layers: int = -1, prefer_default: bool = False) -> 'Llama':
         """
         Get or load a Llama model instance.
         Enforces single-model policy to prevent VRAM OOM.
         Uses 8192 context by default to accommodate RAG content.
         """
-        if repo_id in cls._instances:
-            return cls._instances[repo_id]
-            
-        # Unload ALL other models to free VRAM before loading new one
-        if cls._instances:
-            print(f"Unloading {len(cls._instances)} active models to free VRAM for {repo_id}...")
-            import gc
-            for key in list(cls._instances.keys()):
-                print(f"Unloading model: {key}")
-                # Explicitly delete the Llama object
-                model_instance = cls._instances[key]
-                del model_instance
-                del cls._instances[key]
-            
-            # Force garbage collection to ensure VRAM is released
-            cls._instances.clear()
-            gc.collect()
-            
-            # Force CUDA to release memory (critical for OOM prevention)
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    print("CUDA memory cache cleared.")
-            except Exception:
-                pass  # torch might not be available
-            
         model_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
-        print(f"Loading model: {repo_id}...")
-        _notify_progress("loading", -1, f"Loading {model_name} into GPU...")
-        
+
         try:
             # API MODE CHECK
             if config.API_MODE:
+                api_cache_key = f"api::{config.API_BASE_URL.rstrip('/')}::{config.API_MODEL_NAME}"
+                if cls._active_model and cls._active_model.get("cache_key") == api_cache_key:
+                    active_instance = cls._instances.get(api_cache_key)
+                    if active_instance is not None:
+                        return active_instance
+
+                cls.close_all()
                 print(f"DEBUG: API Mode Enabled. Connecting to {config.API_BASE_URL}...")
                 from chatbot.api_client import OpenAIClientWrapper
-                
-                # Use configured API details
+
                 client = OpenAIClientWrapper(
                     base_url=config.API_BASE_URL,
                     api_key=config.API_KEY,
                     model_name=config.API_MODEL_NAME
                 )
-                
-                # Cache it so we don't re-init (though it's cheap)
-                cls._instances[repo_id] = client
+
+                cls._instances[api_cache_key] = client
+                cls._active_model = {
+                    "cache_key": api_cache_key,
+                    "kind": "api",
+                }
                 _notify_progress("ready", 1.0, f"API: {config.API_MODEL_NAME}")
                 return client
 
@@ -548,128 +941,108 @@ class ModelManager:
                 raise ImportError("llama-cpp-python is missing. Cannot load local model.")
 
             model_path = cls.ensure_model_path(repo_id)
-            
-            # Load with GPU offload
-            # n_gpu_layers = -1 means 'all layers' (good for 3060 12GB)
-            # n_ctx depends on usage (8192 for darkidol, 2048 for joints)
-            
-            # Check model file size for multi-GPU splitting logic
-            file_stats = os.stat(model_path)
-            file_size_gb = file_stats.st_size / (1024 * 1024 * 1024)
-            
-            # Default params
-            split_mode = 1 # LLAMA_SPLIT_MODE_LAYER
-            tensor_split = None
-            
-            # Auto-detect multi-GPU/large model scenario
-            # If model is > 16GB (e.g. 32B model) and we have multiple GPUs
+
+            metadata = {}
+            architecture = "unknown"
+            trained_ctx = 0
+            total_layers = 0
             try:
-                import torch
-                gpu_count = torch.cuda.device_count()
-            except ImportError:
-                gpu_count = 0
-            
-            # Default loading strategy
-            load_candidates = [{"n_gpu_layers": n_gpu_layers, "use_mmap": True}]
+                metadata = _inspect_gguf_metadata(model_path)
+                architecture = str(metadata.get("general.architecture") or "unknown")
+                if architecture != "unknown":
+                    trained_ctx = int(metadata.get(f"{architecture}.context_length") or 0)
+                    total_layers = int(metadata.get(f"{architecture}.block_count") or 0)
+            except Exception as metadata_error:
+                print(f"⚠️ GGUF metadata inspection failed for {model_path}: {metadata_error}")
 
-            print(f"DEBUG: File Size: {file_size_gb:.2f}GB, GPUs: {gpu_count}")
-            if file_size_gb > 16.0 and gpu_count > 1:
-                print(f"⚠️ Large model detected ({file_size_gb:.1f} GB) with {gpu_count} GPUs.")
-                print("   -> Activating Multi-GPU Tensor Split Mode (ROW SPLIT).")
-                
-                # Robust Dynamic VRAM Strategy
-                # Calculates exact maximal layer count based on model size and VRAM
-                try:
-                    import torch
-                    
-                    if torch.cuda.is_available():
-                        # 1. Get Free VRAM
-                        # Use the minimum free memory across cards to avoid bottlenecking one
-                        min_free_vram_gb = min([torch.cuda.mem_get_info(i)[0] for i in range(gpu_count)]) / (1024**3)
-                        print(f"🔍 Dynamic Load: Avail VRAM per card: {min_free_vram_gb:.2f} GB")
+            file_size_gb = os.path.getsize(model_path) / (1024 * 1024 * 1024)
+            if total_layers <= 0:
+                total_layers = max(24, int(round(file_size_gb / 0.32)))
 
-                        # 2. Check Model Size
-                        # If using the simplified ID, we might need to resolve it, but here we assume model_id is a path if it ends with .gguf
-                        if model_path.endswith(".gguf") and os.path.exists(model_path):
-                             model_size_gb = os.path.getsize(model_path) / (1024**3)
-                        else:
-                             # Fallback relative to hardcoded known sizes
-                             model_size_gb = 20.0 
-                        
-                        print(f"   Model Size: {model_size_gb:.2f} GB")
+            if cls._active_model:
+                active = cls._active_model
+                if active.get("kind") == "local" and active.get("model_path") == model_path:
+                    active_instance = cls._instances.get(active.get("cache_key", ""))
+                    requested_ctx = int(active.get("requested_n_ctx", 0))
+                    if active_instance is not None and (
+                        int(active.get("n_ctx", 0)) >= n_ctx or requested_ctx == n_ctx
+                    ):
+                        print(
+                            f"Reusing loaded model {model_name} "
+                            f"(active ctx={active.get('n_ctx')}, requested ctx={n_ctx})"
+                        )
+                        return active_instance
 
-                        # 3. Calculate Layers
-                        # Qwen 32B has roughly 64 transformer layers
-                        # We reserve VRAM for KV cache (context) and overhead
-                        # 8192 context ~ 2GB KV cache (1GB per card) + 1GB buffer = 2GB safety per card
-                        
-                        # Estimate layer count from model size
-                        # ~0.3GB per layer for 32B Q4, ~0.2GB for 14B, ~0.5GB for 70B
-                        TOTAL_LAYERS = max(32, int(model_size_gb / 0.32))
-                        LAYER_OVERHEAD = 0.5 # Extra space for output heads/norms
-                        
-                        # Size per layer (approx)
-                        gb_per_layer = model_size_gb / (TOTAL_LAYERS + LAYER_OVERHEAD)
-                        
-                        # Safety Buffer (KV Cache + Desktop Overhead)
-                        SAFETY_BUFFER_GB = 1.5 
-                        
-                        usable_vram_per_card = max(0, min_free_vram_gb - SAFETY_BUFFER_GB)
-                        total_usable_vram = usable_vram_per_card * gpu_count
-                        
-                        # Max layers fitting in usable VRAM
-                        calculated_layers = int(total_usable_vram / gb_per_layer)
-                        
-                        # Clamp
-                        calculated_layers = max(0, min(TOTAL_LAYERS, calculated_layers))
-                        
-                        print(f"   Calculated Safe Layers: {calculated_layers} (Based on {total_usable_vram:.2f}GB usable VRAM)")
+                if prefer_default:
+                    default_id = getattr(config, "DEFAULT_MODEL", None)
+                    active_repo_id = active.get("repo_id")
+                    active_instance = cls._instances.get(active.get("cache_key", ""))
+                    block_large = getattr(config, "BLOCK_LARGE_DEFAULT_REUSE_FOR_AUX", True)
+                    if (
+                        active_instance is not None
+                        and default_id
+                        and active_repo_id == default_id
+                        and (not block_large or not cls._is_large_model_id(default_id))
+                    ):
+                        print(f"Reusing active default model for auxiliary task: {default_id}")
+                        return active_instance
 
-                        # Generate ONE optimal candidate + fallbacks
-                        load_candidates = [
-                            {"n_gpu_layers": calculated_layers, "use_mmap": False, "desc": f"Auto-Optimized ({calculated_layers} layers)"},
-                            {"n_gpu_layers": max(0, calculated_layers - 8), "use_mmap": False, "desc": f"Safe Fallback ({max(0, calculated_layers - 8)} layers)"},
-                            {"n_gpu_layers": 0, "use_mmap": True, "desc": "CPU Only", "hide_gpu": True}
-                        ]
-                    else:
-                        print("⚠️ No CUDA, falling back to CPU candidates.")
+            cls.close_all()
 
-                except Exception as e:
-                     import traceback
-                     traceback.print_exc()
-                     print(f"⚠️ Dynamic sizing failed: {e}. Using conservative defaults.")
-                     # Fallback to safe table
-                     load_candidates = [
-                        {"n_gpu_layers": 32, "use_mmap": False, "desc": "Fallback (32 layers)"},
-                        {"n_gpu_layers": 16, "use_mmap": False, "desc": "Fallback (16 layers)"},
-                        {"n_gpu_layers": 0,  "use_mmap": True,  "desc": "CPU Only"}
-                     ]
-            
-            # Iterative Loading Loop - Strict
+            gpus = _detect_gpu_inventory()
+            gpu_enabled = _llama_gpu_offload_enabled() and bool(gpus)
+            load_candidates = _build_load_candidates(
+                file_size_gb=file_size_gb,
+                total_layers=total_layers,
+                gpus=gpus,
+                requested_n_ctx=n_ctx,
+                requested_n_gpu_layers=n_gpu_layers,
+                trained_ctx=trained_ctx,
+            )
+
+            print(f"Loading model: {repo_id}...")
+            print(
+                f"DEBUG: arch={architecture}, layers={total_layers}, trained_ctx={trained_ctx or 'unknown'}, "
+                f"file_size={file_size_gb:.2f}GB, gpu_backend={gpu_enabled}, gpus={len(gpus)}"
+            )
+            _notify_progress("loading", -1, f"Loading {model_name}...")
+
             last_error = None
             original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+            cpu_count = os.cpu_count() or 4
+            configured_threads = int(getattr(config, "LLAMA_THREADS", 0) or 0)
+            configured_threads_batch = int(getattr(config, "LLAMA_THREADS_BATCH", 0) or 0)
+            n_threads = configured_threads if configured_threads > 0 else max(1, cpu_count - 1)
+            n_threads_batch = configured_threads_batch if configured_threads_batch > 0 else max(1, cpu_count)
 
             for load_config in load_candidates:
                 current_layers = load_config.get("n_gpu_layers", n_gpu_layers)
+                current_ctx = load_config.get("n_ctx", n_ctx)
                 current_mmap = load_config.get("use_mmap", True)
                 desc = load_config.get("desc", f"Standard ({current_layers} layers)")
                 hide_gpu = load_config.get("hide_gpu", False)
-                
-                print(f"🔄 Attempting load: {desc}...")
+                current_tensor_split = load_config.get("tensor_split")
+
+                print(
+                    f"🔄 Attempting load: {desc} | batch={load_config.get('n_batch')} "
+                    f"| ubatch={load_config.get('n_ubatch')} | flash={load_config.get('flash_attn')} "
+                    f"| mmap={current_mmap} | {load_config.get('gpu_summary')}"
+                )
                 _notify_progress("loading", -1, f"Loading {model_name} ({desc})...")
 
                 try:
-                    # Clean up before attempt
                     try:
                         import gc
+
                         gc.collect()
                         import torch
+
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
                     except Exception as cleanup_err:
                         print(f"⚠️ Cleanup Warning: {cleanup_err}")
 
-                    # Handle GPU hiding for CPU mode
                     if hide_gpu:
                         print("   -> Hiding GPUs to prevent CUDA OOM...")
                         os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -681,43 +1054,78 @@ class ModelManager:
                     llm = Llama(
                         model_path=model_path,
                         n_gpu_layers=current_layers,
-                        n_ctx=n_ctx,
-                        split_mode=split_mode,
-                        tensor_split=tensor_split,
+                        n_ctx=current_ctx,
+                        n_batch=load_config.get("n_batch"),
+                        n_ubatch=load_config.get("n_ubatch"),
+                        n_threads=n_threads,
+                        n_threads_batch=n_threads_batch,
+                        split_mode=load_config.get("split_mode", LLAMA_SPLIT_MODE_LAYER),
+                        tensor_split=current_tensor_split,
+                        main_gpu=load_config.get("main_gpu", 0),
                         use_mmap=current_mmap,
-                        verbose=True 
+                        flash_attn=load_config.get("flash_attn", False),
+                        offload_kqv=load_config.get("offload_kqv", True),
+                        op_offload=load_config.get("op_offload"),
+                        verbose=True
                     )
-                    
-                    # Restore env if changed
+
                     if hide_gpu:
                         if original_cuda_visible is not None:
                             os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
                         else:
                             del os.environ["CUDA_VISIBLE_DEVICES"]
 
-                    cls._instances[repo_id] = llm
+                    cache_key = (
+                        f"local::{model_path}::{current_ctx}::{current_layers}:"
+                        f"{int(bool(load_config.get('flash_attn')))}"
+                    )
+                    cls._instances[cache_key] = llm
+                    cls._active_model = {
+                        "cache_key": cache_key,
+                        "kind": "local",
+                        "model_path": model_path,
+                        "repo_id": repo_id,
+                        "n_ctx": current_ctx,
+                        "requested_n_ctx": n_ctx,
+                        "n_gpu_layers": current_layers,
+                        "architecture": architecture,
+                    }
                     _notify_progress("ready", 1.0, f"{model_name} ready")
-                    print(f"✅ Model {repo_id} loaded successfully using: {desc}")
+                    print(
+                        f"✅ Model {repo_id} loaded successfully using: {desc} "
+                        f"(arch={architecture}, ctx={current_ctx}, gpu_layers={current_layers})"
+                    )
                     return llm
 
                 except Exception as e:
                     print(f"⚠️ Load Failed ({desc}): {e}")
                     last_error = e
-                    # Restore env for next attempt (e.g. going from CPU back to GPU? Unlikely order, but good practice)
                     if hide_gpu:
-                         if original_cuda_visible is not None:
+                        if original_cuda_visible is not None:
                             os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
-                         elif "CUDA_VISIBLE_DEVICES" in os.environ:
+                        elif "CUDA_VISIBLE_DEVICES" in os.environ:
                             del os.environ["CUDA_VISIBLE_DEVICES"]
-                    # Continue to next candidate
-            
-            # If we get here, all attempts failed
+
             _notify_progress("error", -1, f"Failed to load: {last_error}")
             print(f"❌ All load attempts failed for {repo_id}. Last error: {last_error}")
+
+            last_error_text = str(last_error or "").lower()
+            arch_hint = _KNOWN_UNSUPPORTED_ARCH_HINTS.get(architecture)
+            backend_version = getattr(llama_cpp, "__version__", "unknown")
+            if arch_hint and (
+                "failed to load model from file" in last_error_text
+                or "unknown model architecture" in last_error_text
+                or backend_version == "0.3.16"
+            ):
+                raise RuntimeError(
+                    f"{arch_hint} Architecture: {architecture}. "
+                    f"Bundled backend: llama-cpp-python {backend_version}. "
+                    f"Original loader error: {last_error}"
+                )
+
             raise last_error
 
         except Exception as e:
-            # Catch-all for the outer try block (API mode, pathing, etc)
             print(f"❌ Model Manager Error: {e}")
             _notify_progress("error", -1, str(e))
             raise e
@@ -725,5 +1133,31 @@ class ModelManager:
     @classmethod
     def close_all(cls):
         """Free memory."""
+        if not cls._instances:
+            cls._active_model = None
+            return
+
+        print(f"Unloading {len(cls._instances)} active model instance(s)...")
+        import gc
+
+        for key, model_instance in list(cls._instances.items()):
+            print(f"Unloading model: {key}")
+            close_fn = getattr(model_instance, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception as close_error:
+                    print(f"⚠️ Model close warning for {key}: {close_error}")
+
         cls._instances.clear()
-        # Python GC should handle the rest if no refs remain
+        cls._active_model = None
+        gc.collect()
+
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        except Exception:
+            pass

@@ -102,12 +102,29 @@ class SearchModule:
         # Falls back to default model if tiny model unavailable
         llm = None
         title_gen_model = getattr(config, 'TITLE_GEN_MODEL', None)
-        models_to_try = [title_gen_model, config.MODEL_QWEN_1_5B, config.DEFAULT_MODEL]
-        models_to_try = [m for m in models_to_try if m]  # Filter None
+        models_to_try = [title_gen_model, config.MODEL_QWEN_1_5B]
+
+        default_model = getattr(config, "DEFAULT_MODEL", None)
+        default_lower = (default_model or "").lower()
+        default_is_large = any(marker in default_lower for marker in ("32b", "34b", "70b", "72b", "405b"))
+        if default_model and not default_is_large:
+            models_to_try.append(default_model)
+
+        models_to_try = [m for m in models_to_try if m]
 
         for model_name in models_to_try:
             try:
-                llm = ModelManager.get_model(model_name)
+                model_lower = (model_name or "").lower()
+                if model_name == default_model:
+                    llm = ModelManager.get_model(
+                        model_name,
+                        n_ctx=getattr(config, 'DEFAULT_CONTEXT_SIZE', 8192),
+                        prefer_default=True,
+                    )
+                elif "0.5b" in model_lower or "0_5b" in model_lower or "1.5b" in model_lower or "1_5b" in model_lower:
+                    llm = ModelManager.get_model(model_name, n_ctx=2048, prefer_default=True)
+                else:
+                    llm = ModelManager.get_model(model_name, prefer_default=True)
                 if llm:
                     debug_print(f"Title generation using model: {model_name}")
                     break

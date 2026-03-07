@@ -68,25 +68,46 @@ def extract_json_from_text(text: str) -> Optional[Any]:
         
     return None
 
-def local_inference(model: str, prompt: str, temperature: float = 0.0, timeout: int = 5, use_json_grammar: bool = False):
+def local_inference(
+    model: str,
+    prompt: str,
+    temperature: float = 0.0,
+    timeout: int = 5,
+    use_json_grammar: bool = False,
+    system_prompt: str = None,
+    n_ctx: int = None,
+    max_tokens: int = 512,
+    prefer_default: bool = True,
+):
     """
     Run local inference using ModelManager.
     Uses chat completion to avoid KV cache contamination.
+
+    Context is selected by model tier so tiny helper joints stay cheap.
     """
-    # Use larger context size for joints to handle retrieved content
-    n_ctx = 4096  # Increased from 2048 to prevent overflow
+    if n_ctx is None:
+        model_lower = (model or "").lower()
+        if "0.5b" in model_lower or "0_5b" in model_lower:
+            n_ctx = 2048
+        elif "1.5b" in model_lower or "1_5b" in model_lower:
+            n_ctx = 2048
+        else:
+            n_ctx = 4096
+
     try:
-        llm = ModelManager.get_model(model, n_ctx=n_ctx)
-        
-        # Use chat completion to avoid KV cache issues
+        llm = ModelManager.get_model(model, n_ctx=n_ctx, prefer_default=prefer_default)
+
+        if system_prompt is None:
+            system_prompt = "You are a precise JSON extraction system. Output only valid JSON."
+
         messages = [
-            {"role": "system", "content": "You are a precise JSON extraction system. Output only valid JSON."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ]
-        
+
         response = llm.create_chat_completion(
             messages=messages,
-            max_tokens=512,
+            max_tokens=max_tokens,
             temperature=temperature
         )
         return response['choices'][0]['message']['content']
