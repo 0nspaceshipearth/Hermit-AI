@@ -4,7 +4,7 @@ import re
 from typing import List, Dict, Optional, Any
 from chatbot import config
 from chatbot.debug_utils import debug_print
-from chatbot.state import HermitContext
+from chatbot.state import HermitContext, route_plan_for_goal
 from chatbot.intent import classify_query_complexity, QueryComplexity
 
 class OrchestrationModule:
@@ -27,6 +27,7 @@ class OrchestrationModule:
         # Initialize context with complexity hints
         ctx = HermitContext(original_query=query)
         ctx.complexity = complexity
+        ctx.set_route(route_plan_for_goal(query, complexity.level))
         ctx.log(f"🚀 Starting orchestrated retrieval for: '{query}'")
         ctx.log(f"📊 Query complexity: {complexity.level} (max_steps={complexity.max_steps})")
         
@@ -39,22 +40,38 @@ class OrchestrationModule:
             ctx.log(f"▶ Executing step: {step}")
             
             # Dispatch to appropriate handler
-            if step == "extract":
-                self._orchestrate_extract(ctx)
-            elif step == "resolve":
-                self._orchestrate_resolve(ctx)
-            elif step == "search":
-                self._orchestrate_search(ctx)
-            elif step == "score":
-                self._orchestrate_score(ctx)
-            elif step == "verify":
-                self._orchestrate_verify(ctx)
-            elif step == "expand":
-                self._orchestrate_expand(ctx)
-            elif step == "targeted_search":
-                 self._orchestrate_targeted(ctx)
-            else:
-                ctx.log(f"⚠ Unknown step '{step}', skipping")
+            try:
+                if step == "extract":
+                    self._orchestrate_extract(ctx)
+                elif step == "resolve":
+                    self._orchestrate_resolve(ctx)
+                elif step == "search":
+                    self._orchestrate_search(ctx)
+                elif step == "score":
+                    self._orchestrate_score(ctx)
+                elif step == "verify":
+                    self._orchestrate_verify(ctx)
+                elif step == "expand":
+                    self._orchestrate_expand(ctx)
+                elif step == "targeted_search":
+                    self._orchestrate_targeted(ctx)
+                else:
+                    ctx.log(f"⚠ Unknown step '{step}', skipping")
+                    ctx.add_residue(step, "skipped", "unknown step")
+                    continue
+
+                ctx.add_residue(
+                    step,
+                    "ok",
+                    metrics={
+                        "ambiguity_score": float(ctx.signals.get("ambiguity_score", 0.0)),
+                        "highest_source_score": float(ctx.signals.get("highest_source_score", 0.0)),
+                        "coverage_ratio": float(ctx.signals.get("coverage_ratio", 0.0)),
+                    },
+                )
+            except Exception as exc:
+                ctx.add_residue(step, "error", str(exc))
+                raise
                 
             # Apply gear-shifting logic after each step
             self._apply_gear_shift(ctx)

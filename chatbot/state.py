@@ -17,6 +17,25 @@ from typing import List, Dict, Any, Optional
 
 
 @dataclass
+class ResidueEntry:
+    """Compact trace item emitted by each orchestration step."""
+
+    step: str
+    status: str  # ok | skipped | error
+    note: str = ""
+    metrics: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class GoalRoute:
+    """Goal-driven routing decision for the orchestration plan."""
+
+    goal: str
+    plan: List[str]
+    confidence: float = 0.5
+
+
+@dataclass
 class HermitContext:
     """
     Context Envelope for Dynamic RAG Orchestration.
@@ -45,6 +64,9 @@ class HermitContext:
         "score",
         "verify"
     ])
+
+    # Top-level goal selected by router (can evolve over time)
+    active_goal: str = "factual_lookup"
     
     # Extracted Data
     extracted_entities: Optional[Dict[str, Any]] = None
@@ -63,6 +85,9 @@ class HermitContext:
     
     # Iteration Results (for multi-hop or refinement)
     iteration_results: Dict[str, Any] = field(default_factory=dict)
+
+    # Residue schema: compact execution trail from the orchestration loop
+    residue: List[ResidueEntry] = field(default_factory=list)
     
     def log(self, message: str) -> None:
         """
@@ -114,6 +139,23 @@ class HermitContext:
             self.signals["step_counter"] >= 10
         )
     
+    def add_residue(self, step: str, status: str, note: str = "", metrics: Optional[Dict[str, float]] = None) -> None:
+        """Append a compact residue record for post-hoc reasoning/debugging."""
+        self.residue.append(
+            ResidueEntry(
+                step=step,
+                status=status,
+                note=note,
+                metrics=metrics or {},
+            )
+        )
+
+    def set_route(self, route: GoalRoute) -> None:
+        """Apply goal-driven route decision to this context."""
+        self.active_goal = route.goal
+        self.current_plan = list(route.plan)
+        self.log(f"🧭 Goal route '{route.goal}' selected (confidence={route.confidence:.2f})")
+
     def get_summary(self) -> Dict[str, Any]:
         """
         Get a summary of the current context state.
@@ -123,10 +165,40 @@ class HermitContext:
         """
         return {
             "query": self.original_query,
+            "active_goal": self.active_goal,
             "steps_executed": int(self.signals["step_counter"]),
             "steps_remaining": len(self.current_plan),
             "plan": self.current_plan,
             "signals": self.signals,
             "num_results": len(self.retrieved_data),
-            "num_logs": len(self.logs)
+            "num_logs": len(self.logs),
+            "residue_events": len(self.residue),
         }
+
+
+def route_plan_for_goal(query: str, complexity_level: str = "simple") -> GoalRoute:
+    """Base goal router for orchestration plan selection.
+
+    Keeps behavior close to current pipeline while introducing explicit routing.
+    """
+    q = (query or "").lower()
+
+    if any(token in q for token in ["compare", "versus", " vs ", "difference"]):
+        return GoalRoute(
+            goal="comparison_analysis",
+            plan=["extract", "search", "score", "verify"],
+            confidence=0.75,
+        )
+
+    if complexity_level == "complex":
+        return GoalRoute(
+            goal="multi_hop_resolution",
+            plan=["extract", "search", "resolve", "score", "verify"],
+            confidence=0.70,
+        )
+
+    return GoalRoute(
+        goal="factual_lookup",
+        plan=["extract", "search", "score", "verify"],
+        confidence=0.80,
+    )
