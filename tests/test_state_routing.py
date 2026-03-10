@@ -74,10 +74,29 @@ class TestStateRouting(unittest.TestCase):
 
         snapshot = ctx.residue_snapshot(limit=3)
 
+        self.assertIn("contract", snapshot)
+        self.assertEqual(snapshot["contract"]["version"], "base_mind.v1")
+        self.assertTrue(snapshot["contract"]["ok"])
+        self.assertEqual(snapshot["contract"]["issues"], [])
         self.assertIn("base_mind", snapshot)
         self.assertEqual(snapshot["base_mind"]["objective"], "factual_lookup")
         self.assertIn("routing", snapshot["base_mind"])
         self.assertIn("steps", snapshot["base_mind"])
+
+    def test_apply_routing_normalizes_invalid_mode(self):
+        ctx = HermitContext(original_query="test")
+        ctx.apply_routing(RoutingDirective(mode="unknown_mode", reason="  ", confidence=0.5))
+
+        self.assertEqual(ctx.routing_mode, "local_only")
+        self.assertEqual(ctx.routing_reason, "unspecified")
+
+    def test_residue_snapshot_limit_is_safeguarded(self):
+        ctx = HermitContext(original_query="test")
+        ctx.add_residue("extract", "ok", "seed")
+
+        snapshot = ctx.residue_snapshot(limit=0)
+
+        self.assertEqual(len(snapshot["residue"]), 1)
 
     def test_classify_routing_mode_detects_freshness_intent(self):
         directive = classify_routing_mode("What is the latest Python version?")

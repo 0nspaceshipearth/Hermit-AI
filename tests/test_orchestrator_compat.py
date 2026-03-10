@@ -93,6 +93,8 @@ class TestOrchestrationStatusSurfaces(unittest.TestCase):
         self.assertIsInstance(dummy.last_orchestration_snapshot, dict)
         self.assertEqual(dummy.last_orchestration_status["mode"], "retrieval_tools")
         self.assertGreaterEqual(dummy.last_orchestration_status["artifact_summary"]["count"], 1)
+        self.assertIn("contract", dummy.last_orchestration_snapshot)
+        self.assertTrue(dummy.last_orchestration_snapshot["contract"]["ok"])
         self.assertIn("base_mind", dummy.last_orchestration_snapshot)
         self.assertIn("objective_frontier_risk", dummy.last_orchestration_snapshot)
         self.assertTrue(

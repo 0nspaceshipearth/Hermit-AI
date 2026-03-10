@@ -151,6 +151,7 @@ class HermitContext:
     _VALID_STEP_STATUS = {"ok", "skipped", "error", "info"}
     _VALID_ARTIFACT_STATUS = {"ok", "error", "skipped"}
     _VALID_ARTIFACT_MODES = {"local_retrieval", "retrieval_tool"}
+    _VALID_ROUTING_MODES = {"local_only", "retrieval_tools"}
     
     def log(self, message: str) -> None:
         """
@@ -280,6 +281,10 @@ class HermitContext:
             return value
         return "retrieval_tool" if "tool" in value else "local_retrieval"
 
+    def _normalize_routing_mode(self, mode: str) -> str:
+        value = (mode or "").strip().lower()
+        return value if value in self._VALID_ROUTING_MODES else "local_only"
+
     def _normalize_payload(self, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not payload:
             return {}
@@ -307,18 +312,21 @@ class HermitContext:
 
     def apply_routing(self, directive: RoutingDirective, step: str = "router") -> None:
         """Record a routing-hook decision in the blackboard for inspectability."""
-        self.routing_mode = directive.mode
-        self.routing_reason = directive.reason
+        normalized_mode = self._normalize_routing_mode(directive.mode)
+        normalized_reason = (directive.reason or "").strip() or "unspecified"
+
+        self.routing_mode = normalized_mode
+        self.routing_reason = normalized_reason
         self.log(
-            f"🪝 Routing hook: mode={directive.mode} reason='{directive.reason}' "
+            f"🪝 Routing hook: mode={normalized_mode} reason='{normalized_reason}' "
             f"(confidence={directive.confidence:.2f})"
         )
         self.emit_event(
             kind="routing_hook",
             step=step,
             status="ok",
-            message=directive.reason,
-            payload={"mode": directive.mode, "confidence": directive.confidence},
+            message=normalized_reason,
+            payload={"mode": normalized_mode, "confidence": directive.confidence},
         )
 
     def update_ofr_residue(self, step: str = "controller", status: str = "info") -> None:
@@ -380,7 +388,14 @@ class HermitContext:
 
     def residue_snapshot(self, limit: int = 12) -> Dict[str, Any]:
         """Return a compact serializable view of residue/events for downstream use."""
+        safe_limit = max(1, int(limit or 1))
+        contract = self.validate_observability_contract()
         return {
+            "contract": {
+                "version": "base_mind.v1",
+                "ok": contract["ok"],
+                "issues": list(contract["issues"]),
+            },
             "active_goal": self.active_goal,
             "routing_mode": self.routing_mode,
             "routing_reason": self.routing_reason,
@@ -404,7 +419,7 @@ class HermitContext:
                     "note": r.note,
                     "metrics": dict(r.metrics),
                 }
-                for r in self.residue[-limit:]
+                for r in self.residue[-safe_limit:]
             ],
             "events": [
                 {
@@ -415,7 +430,7 @@ class HermitContext:
                     "timestamp": e.timestamp,
                     "payload": dict(e.payload),
                 }
-                for e in self.events[-limit:]
+                for e in self.events[-safe_limit:]
             ],
             "artifacts": [
                 {
@@ -427,9 +442,27 @@ class HermitContext:
                     "timestamp": a.timestamp,
                     "payload": dict(a.payload),
                 }
-                for a in self.artifacts[-limit:]
+                for a in self.artifacts[-safe_limit:]
             ],
         }
+
+    def validate_observability_contract(self) -> Dict[str, Any]:
+        """Return a compact health signal for status/snapshot observability contracts."""
+        issues: List[str] = []
+
+        if self.routing_mode not in self._VALID_ROUTING_MODES:
+            issues.append("invalid_routing_mode")
+
+        if self.ofr_residue and self.ofr_residue.objective != self.active_goal:
+            issues.append("ofr_objective_mismatch")
+
+        if self.events and self.events[-1].status not in self._VALID_STEP_STATUS:
+            issues.append("invalid_event_status")
+
+        if self.artifacts and self.artifacts[-1].status not in self._VALID_ARTIFACT_STATUS:
+            issues.append("invalid_artifact_status")
+
+        return {"ok": len(issues) == 0, "issues": issues}
 
     def orchestration_status_report(self) -> Dict[str, Any]:
         """Small observability surface for orchestration routing + residue health."""
@@ -440,6 +473,7 @@ class HermitContext:
             artifact_by_status[artifact.status] = artifact_by_status.get(artifact.status, 0) + 1
 
         latest_artifact = self.artifacts[-1] if self.artifacts else None
+        contract = self.validate_observability_contract()
 
         return {
             "mode": self.routing_mode,
@@ -463,6 +497,8 @@ class HermitContext:
             "ofr_risk": self.ofr_residue.risk if self.ofr_residue else "unknown",
             "steps_executed": int(self.signals.get("step_counter", 0)),
             "steps_remaining": len(self.current_plan),
+            "contract_ok": contract["ok"],
+            "contract_issues": contract["issues"],
         }
 
     def get_summary(self) -> Dict[str, Any]:
