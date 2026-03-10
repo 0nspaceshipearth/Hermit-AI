@@ -38,6 +38,7 @@ from chatbot.chat import (
     stream_chat,
     full_chat,
     build_messages,
+    build_messages_with_intent,
     set_status_callback,
     retrieve_and_display_links,
     clear_runtime_memory,
@@ -46,7 +47,8 @@ from chatbot import config
 from chatbot.config import DEFAULT_MODEL
 from chatbot.model_manager import set_download_callback, ModelManager
 from chatbot.preferences import load_theme_name, save_theme_name
-from chatbot.teleport import build_desktop_write_envelope, execute_desktop_write_contract, wave_mode_enabled
+from chatbot.teleport import build_shell_envelope, wave_mode_enabled
+from chatbot.agent_runtime import execute_file_write_from_response, file_generation_contract
 
 
 class DownloadProgressDialog:
@@ -3216,42 +3218,30 @@ Keyboard Shortcuts:
         help_window.bind("<KeyPress>", on_key)
     
     def _maybe_handle_desktop_write_intent(self, user_input: str) -> bool:
-        """Wave-only teleport contract for desktop Python writes.
-
-        No prose fallback: either we execute a bounded contract or emit a contract error.
-        """
-        envelope = build_desktop_write_envelope(user_input)
+        """Wave-only shell/file creation contract handled via shared runtime helpers."""
+        envelope = build_shell_envelope(user_input)
         if envelope is None:
             return False
 
-        if not wave_mode_enabled():
-            self.append_message("system", "Teleport contract refused: desktop write intents are only executable in /mode wave.")
+        if envelope.constraints.get("refused") or not wave_mode_enabled():
+            self.append_message("system", envelope.constraints.get("reason", "Teleport contract refused: shell intents are only executable in /mode wave."))
             return True
 
-        code_prompt = (
-            "Write a complete runnable Python script for this request. "
-            "Return ONLY python code, no markdown fences, no explanation.\n\n"
-            f"Request: {user_input.strip()}"
-        )
+        if envelope.intent not in ("file_write", "script_create"):
+            # Let the shared chat/runtime flow handle shell commands elsewhere.
+            return False
 
         try:
+            code_prompt = user_input.strip() + file_generation_contract(envelope)
             temp_history = [Message(role="user", content=code_prompt)]
-            messages = build_messages(self.system_prompt, temp_history, user_query=code_prompt)
+            messages, _intent = build_messages_with_intent(self.system_prompt, temp_history, user_query=code_prompt)
             code = full_chat(self.model, messages).strip()
-            fence_match = re.search(r"```(?:python)?\s*(.*?)```", code, flags=re.DOTALL | re.IGNORECASE)
-            if fence_match:
-                code = fence_match.group(1).strip()
 
-            if not code:
-                self.append_message("system", "Teleport contract failed: generated artifact was empty.")
-                return True
-
-            result = execute_desktop_write_contract(envelope, code)
-            if result.ok:
-                self.append_message("system", result.message)
-                self.append_message("system", f"artifact: {result.artifact.get('path', '')}")
+            result_text = execute_file_write_from_response(envelope, code, os.getcwd())
+            if result_text:
+                self.append_message("system", result_text)
             else:
-                self.append_message("system", f"Teleport contract failed [{result.status}]: {result.message}")
+                self.append_message("system", "Teleport contract failed: model did not return a valid [HERMIT_FILE] block or code fence.")
             return True
         except Exception as e:
             self.append_message("system", f"Teleport contract failed [execution_error]: {e}")

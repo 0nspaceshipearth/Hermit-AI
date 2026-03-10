@@ -28,17 +28,16 @@ import libzim
 
 from chatbot.rag import RAGSystem, TextProcessor
 from chatbot import config
-from chatbot.chat import build_messages, build_messages_with_intent, stream_chat, clear_runtime_memory, load_runtime_checkpoint, save_runtime_checkpoint
+from chatbot.chat import build_messages, build_messages_with_intent, stream_chat, clear_runtime_memory, load_runtime_checkpoint
 from chatbot.model_manager import ModelManager
 from chatbot.models import Message
-from chatbot.teleport import (
-    execute_teleport_contract,
-    execute_shell_command,
-    TeleportEnvelope,
-    TeleportResult,
-    wave_mode_enabled,
-    detect_command,
-    detect_target_path,
+from chatbot.teleport import TeleportEnvelope, wave_mode_enabled
+from chatbot.agent_runtime import (
+    execute_teleport_for_workspace,
+    extract_agent_command,
+    execute_file_write_from_response,
+    file_generation_contract,
+    record_chamber_artifact,
 )
 
 
@@ -544,46 +543,8 @@ class ChatbotCLI(cmd.Cmd):
         save_runtime_checkpoint(checkpoint)
 
     def _execute_teleport(self, envelope):
-        """Execute a teleport envelope and return the formatted result string."""
-        intent = envelope.intent
-        workspace = str(self.cwd)
-        envelope.constraints["workspace"] = workspace
-
-        if intent == "shell_command":
-            # If no command was auto-detected, try extracting from objective
-            if not envelope.constraints.get("command"):
-                cmd_guess = detect_command(envelope.objective)
-                if cmd_guess:
-                    envelope.constraints["command"] = cmd_guess
-                else:
-                    # The objective itself might be the command
-                    envelope.constraints["command"] = envelope.objective
-            result = execute_teleport_contract(envelope)
-        elif intent in ("file_write", "script_create"):
-            # For file writes, we need the LLM to generate the content first
-            # Return None to signal "needs content generation"
-            return None
-        else:
-            result = execute_teleport_contract(envelope)
-
-        if result.ok:
-            output = result.message or "(no output)"
-            artifact = result.artifact or {}
-            self._record_chamber_artifact(
-                envelope,
-                "ok",
-                f"command completed (exit={artifact.get('exit_code', 0)})",
-                payload=artifact,
-            )
-            return f"✅ Command executed successfully (exit={artifact.get('exit_code', 0)})\n{output}"
-        else:
-            self._record_chamber_artifact(
-                envelope,
-                "error",
-                f"execution failed: {result.status}",
-                payload=result.artifact or {"message": result.message},
-            )
-            return f"❌ Execution failed: {result.status} — {result.message}"
+        """Execute a teleport envelope via shared runtime helpers."""
+        return execute_teleport_for_workspace(envelope, str(self.cwd))
 
     def _agentic_generate(self, messages):
         """Run LLM generation and return the full response text."""
@@ -641,138 +602,21 @@ class ChatbotCLI(cmd.Cmd):
         return full_response
 
     def _extract_agent_command(self, response):
-        """Extract a [HERMIT_CMD]...[/HERMIT_CMD] block from LLM output.
-
-        Returns the command string if found, else None.
-        """
-        import re
-        match = re.search(r'\[HERMIT_CMD\](.+?)\[/HERMIT_CMD\]', response, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return None
+        """Compatibility shim around shared runtime command extraction."""
+        return extract_agent_command(response)
 
     def _extract_file_content(self, response, language: str = None, require_marker: bool = False):
-        """Extract file content from LLM output.
-
-        Looks for:
-        1. Content in [HERMIT_FILE]...[/HERMIT_FILE] tags
-        2. Content in code fences (```lang ... ```)
-        3. (Optional) the entire response if no markers found
-
-        Args:
-            response: Raw model response
-            language: Optional expected language for fenced blocks
-            require_marker: If True, refuse unmarked prose fallback
-
-        Returns:
-            (content, found_marker) - extracted content and whether a marker was found
-        """
-        import re
-
-        # Try [HERMIT_FILE] tags first (explicit marker)
-        file_match = re.search(r'\[HERMIT_FILE\](.+?)\[/HERMIT_FILE\]', response, re.DOTALL)
-        if file_match:
-            return file_match.group(1).strip(), True
-
-        # Try code fences with language hint
-        fence_pattern = r'```(?:' + (re.escape(language) if language else r'\w*') + r')?\s*\n(.+?)\n```'
-        fence_match = re.search(fence_pattern, response, re.DOTALL)
-        if fence_match:
-            return fence_match.group(1).strip(), True
-
-        # Try any code fence
-        any_fence = re.search(r'```\w*\n(.+?)\n```', response, re.DOTALL)
-        if any_fence:
-            return any_fence.group(1).strip(), True
-
-        # No markers - optionally allow best-effort fallback
-        if require_marker:
-            return None, False
-
-        lines = response.strip().split('\n')
-        if len(lines) > 1 or any(c in response for c in '{}[]()=;:'):
-            return response.strip(), False
-
-        return None, False
+        """Compatibility shim around shared runtime file extraction."""
+        from chatbot.agent_runtime import extract_file_content
+        return extract_file_content(response, language, require_marker)
 
     def _execute_file_write_from_response(self, envelope, response):
-        """Execute a file/script creation using LLM-generated content.
-
-        Args:
-            envelope: The teleport envelope with target_path constraint
-            response: The LLM's response containing the file content
-
-        Returns:
-            Formatted result string or None if no content found
-        """
-        language = envelope.constraints.get("language", "")
-        content, found_marker = self._extract_file_content(response, language, require_marker=True)
-
-        if not content:
-            return None
-
-        # Ensure we have a target path
-        target_path = envelope.constraints.get("target_path")
-        if not target_path:
-            # Generate a default filename
-            import os
-            ext_map = {
-                "python": ".py",
-                "javascript": ".js",
-                "bash": ".sh",
-                "html": ".html",
-                "css": ".css",
-                "json": ".json",
-                "markdown": ".md",
-            }
-            ext = ext_map.get(language, ".txt")
-            stem = "generated_script" if envelope.intent == "script_create" else "generated_file"
-            target_path = os.path.join(str(self.cwd), f"{stem}{ext}")
-            envelope.constraints["target_path"] = target_path
-
-        # Route through contract executor so script_create gets executable scaffolding behavior.
-        result = execute_teleport_contract(envelope, content)
-
-        if result.ok:
-            artifact = result.artifact or {}
-            kind_label = "script" if envelope.intent == "script_create" else "file"
-            self._record_chamber_artifact(
-                envelope,
-                "ok",
-                f"{kind_label} written: {artifact.get('path', target_path)}",
-                payload=artifact,
-            )
-            executable = "\nExecutable: yes" if artifact.get("executable") else ""
-            return (
-                f"✅ {kind_label.capitalize()} written successfully\n"
-                f"Path: {artifact.get('path', target_path)}\n"
-                f"Size: {artifact.get('size', len(content))} chars\n"
-                f"Type: {artifact.get('kind', 'file')}"
-                f"{executable}"
-            )
-        else:
-            self._record_chamber_artifact(
-                envelope,
-                "error",
-                f"{envelope.intent} failed: {result.status}",
-                payload=result.artifact or {"message": result.message},
-            )
-            return f"❌ {envelope.intent} failed: {result.status} — {result.message}"
+        """Execute a file/script creation using shared runtime helpers."""
+        return execute_file_write_from_response(envelope, response, str(self.cwd))
 
     def _file_generation_contract(self, envelope: TeleportEnvelope) -> str:
-        """Build strict output instructions for file/script creation flows."""
-        language = envelope.constraints.get("language", "")
-        target_path = envelope.constraints.get("target_path", "")
-        lang_hint = f" ({language})" if language else ""
-        path_hint = f"Target path: {target_path}\n" if target_path else ""
-        return (
-            "\n\nFILE CREATION CONTRACT:\n"
-            f"- You are generating file contents{lang_hint}.\n"
-            f"- {path_hint}"
-            "- Return ONLY the file body wrapped in [HERMIT_FILE]...[/HERMIT_FILE].\n"
-            "- Do not include explanations, prefaces, or markdown outside the tags.\n"
-            "- If the task is impossible, return [HERMIT_FILE]# unable to generate requested file[/HERMIT_FILE].\n"
-        )
+        """Compatibility shim around shared runtime file-generation contract."""
+        return file_generation_contract(envelope)
 
     def default(self, line):
         """Handle chat interactions — with agentic teleport in wave mode."""
