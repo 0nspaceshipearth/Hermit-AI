@@ -23,10 +23,11 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import json
 import os
-import shlex
-import shutil
+import pty
+import select
 import subprocess
 import threading
+import time
 from typing import List, Tuple, Optional
 from urllib.request import Request, urlopen
 
@@ -1338,29 +1339,85 @@ class ChatbotGUI:
         )
         self._render_terminal_menu(text)
 
-    def _launch_interactive_terminal(self, command: str) -> bool:
-        """Launch an interactive terminal window for commands that require a TTY."""
-        wrapped = f"{command}; echo; echo '[Hermit] Press Enter to close...'; read _"
+    def _run_codex_auth_with_pty(self, login_command: str):
+        """Run OpenClaw Codex login in a PTY so it gets an interactive TTY without spawning another terminal window."""
+        try:
+            master_fd, slave_fd = pty.openpty()
+            proc = subprocess.Popen(
+                login_command,
+                shell=True,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=os.path.expanduser("~"),
+                text=False,
+                close_fds=True,
+            )
+            os.close(slave_fd)
 
-        launchers = []
-        if shutil.which("x-terminal-emulator"):
-            launchers.append(["x-terminal-emulator", "-e", "bash", "-lc", wrapped])
-        if shutil.which("gnome-terminal"):
-            launchers.append(["gnome-terminal", "--", "bash", "-lc", wrapped])
-        if shutil.which("konsole"):
-            launchers.append(["konsole", "-e", "bash", "-lc", wrapped])
-        if shutil.which("xfce4-terminal"):
-            launchers.append(["xfce4-terminal", "--command", f"bash -lc {shlex.quote(wrapped)}"])
-        if shutil.which("xterm"):
-            launchers.append(["xterm", "-e", f"bash -lc {shlex.quote(wrapped)}"])
+            captured = []
+            saw_browser_hint = False
+            start = time.time()
+            while True:
+                if proc.poll() is not None:
+                    # Drain remaining output.
+                    while True:
+                        ready, _, _ = select.select([master_fd], [], [], 0)
+                        if master_fd not in ready:
+                            break
+                        try:
+                            chunk = os.read(master_fd, 4096)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        text = chunk.decode(errors="ignore")
+                        captured.append(text)
+                    break
 
-        for launcher in launchers:
-            try:
-                subprocess.Popen(launcher, cwd=os.path.expanduser("~"))
-                return True
-            except Exception:
-                continue
-        return False
+                ready, _, _ = select.select([master_fd], [], [], 0.3)
+                if master_fd in ready:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        chunk = b""
+                    if chunk:
+                        text = chunk.decode(errors="ignore")
+                        captured.append(text)
+                        low = text.lower()
+                        if ("open this url" in low or "visit" in low or "browser" in low) and not saw_browser_hint:
+                            saw_browser_hint = True
+                            self._post_system("Codex auth is running. If prompted, complete the browser login and come back here.")
+
+                if time.time() - start > 180:
+                    proc.terminate()
+                    self._post_system("Codex auth timed out. Please run it manually in your terminal.")
+                    break
+
+            os.close(master_fd)
+            output = "".join(captured)
+            low = output.lower()
+
+            if proc.returncode == 0:
+                self._post_system("Codex auth completed. Hermit can now use Codex/OpenAI models.")
+                return
+
+            if "no provider plugins found" in low:
+                self._post_system("Codex auth is unavailable because no OpenClaw provider plugins were found on this machine.")
+                self._post_system("Run this once in your terminal to configure providers: openclaw configure")
+                return
+
+            if "requires an interactive tty" in low:
+                self._post_system("Codex auth still reports missing TTY in this environment.")
+                self._post_system("Run manually: openclaw models auth login --provider openai-codex")
+                return
+
+            tail = "\n".join([line for line in output.splitlines() if line.strip()][-8:])
+            self._post_system(f"Codex auth failed (exit {proc.returncode}).")
+            if tail:
+                self._post_system(tail)
+        except Exception as e:
+            self._post_system(f"Failed to start Codex auth flow: {e}")
 
     def _activate_cloud_provider(self, provider: str):
         expected = getattr(config, "CODEX_CLOUD_PROVIDER", "openai-codex")
@@ -1369,12 +1426,8 @@ class ChatbotGUI:
             return
 
         login_command = getattr(config, "CODEX_CLOUD_LOGIN_COMMAND", "openclaw models auth login --provider openai-codex")
-        if self._launch_interactive_terminal(login_command):
-            self.append_message("system", "Opened an interactive terminal for Codex auth. Complete login there, then return to Hermit.")
-        else:
-            self.append_message("system", "Could not open a terminal window automatically.")
-            self.append_message("system", f"Run this manually in your terminal: {login_command}")
-
+        self.append_message("system", "Starting Codex auth inside Hermit…")
+        threading.Thread(target=self._run_codex_auth_with_pty, args=(login_command,), daemon=True).start()
         self._close_command_mode()
 
     def _handle_cloud_input(self, user_input: str):
