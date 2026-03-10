@@ -62,6 +62,10 @@ there are three main signals the orchestrator tracks:
 
 this creates a kind of feedback loop where the system can recognize when its initial retrieval attempt failed and try again with different strategies.
 
+an important implementation detail: orchestration step dispatch is table-driven (step name → handler) rather than a long if/elif chain. this keeps behavior stable while making it easier to add, reorder, or selectively disable steps in future passes without touching controller flow logic.
+
+for runtime observability, the orchestrator now publishes two compact surfaces after each retrieval cycle: `last_orchestration_status` (mode, residue/artifact summary, remaining steps) and `last_orchestration_snapshot` (base-mind + objective/frontier/risk + recent residue/events/artifacts). compatibility tests lock these contracts so future routing changes don't silently break downstream diagnostics.
+
 ---
 
 ## the model tier system

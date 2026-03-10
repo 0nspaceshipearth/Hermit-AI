@@ -20,6 +20,16 @@ class OrchestrationModule:
     - Implementation of orchestration steps (extract, resolve, search, score, etc.)
     """
 
+    _ORCHESTRATION_STEP_HANDLERS = {
+        "extract": "_orchestrate_extract",
+        "resolve": "_orchestrate_resolve",
+        "search": "_orchestrate_search",
+        "score": "_orchestrate_score",
+        "verify": "_orchestrate_verify",
+        "expand": "_orchestrate_expand",
+        "targeted_search": "_orchestrate_targeted",
+    }
+
     def retrieve_with_orchestration(self, query: str, top_k: int = 5) -> List[Dict]:
         """
         Dynamic orchestration-based retrieval with signal-driven decision making.
@@ -62,23 +72,7 @@ class OrchestrationModule:
 
             # Dispatch to appropriate handler
             try:
-                if step == "extract":
-                    self._orchestrate_extract(ctx)
-                elif step == "resolve":
-                    self._orchestrate_resolve(ctx)
-                elif step == "search":
-                    self._orchestrate_search(ctx)
-                elif step == "score":
-                    self._orchestrate_score(ctx)
-                elif step == "verify":
-                    self._orchestrate_verify(ctx)
-                elif step == "expand":
-                    self._orchestrate_expand(ctx)
-                elif step == "targeted_search":
-                    self._orchestrate_targeted(ctx)
-                else:
-                    ctx.log(f"⚠ Unknown step '{step}', skipping")
-                    ctx.add_residue(step, "skipped", "unknown step")
+                if not self._dispatch_orchestration_step(ctx, step):
                     continue
 
                 ctx.add_residue(
@@ -159,7 +153,41 @@ class OrchestrationModule:
             debug_print(f"Orchestration status: {self.last_orchestration_status}")
         
         return ctx.retrieved_data[:top_k]
+
+    def _retrieve_without_orchestration(self, query: str, top_k: int = 10) -> List[Dict]:
+        """Call ``retrieve`` with orchestration temporarily disabled.
+
+        Centralizing this guard avoids subtle flag-leak bugs when retrieval
+        throws inside orchestration sub-steps.
+        """
+        old_flag = config.USE_ORCHESTRATION
+        config.USE_ORCHESTRATION = False
+        try:
+            return self.retrieve(query, top_k=top_k)
+        finally:
+            config.USE_ORCHESTRATION = old_flag
     
+    def _dispatch_orchestration_step(self, ctx, step: str) -> bool:
+        """Dispatch orchestration step handlers from a single lookup table.
+
+        Returns ``True`` when a known step handler was executed, else ``False``
+        after recording a skipped residue entry.
+        """
+        handler_name = self._ORCHESTRATION_STEP_HANDLERS.get(step)
+        if not handler_name:
+            ctx.log(f"⚠ Unknown step '{step}', skipping")
+            ctx.add_residue(step, "skipped", "unknown step")
+            return False
+
+        handler = getattr(self, handler_name, None)
+        if not callable(handler):
+            ctx.log(f"⚠ Missing handler '{handler_name}' for step '{step}', skipping")
+            ctx.add_residue(step, "skipped", "missing handler")
+            return False
+
+        handler(ctx)
+        return True
+
     def _orchestrate_extract(self, ctx) -> None:
         """Extract entities from query andupdate ambiguity score."""
         if not self.use_joints or not hasattr(self, 'entity_joint'):
@@ -224,25 +252,20 @@ class OrchestrationModule:
                 ctx.iteration_results['multi_hop_searches'] = search_terms
                 
                 # Inject search for resolved entity
-                old_flag = config.USE_ORCHESTRATION
-                config.USE_ORCHESTRATION = False
-                try:
-                    for term in search_terms[:2]:  # Try top 2 variations
-                        results = self.retrieve(term, top_k=3)
-                        ctx.record_excursion(
-                            step="resolve",
-                            mode="retrieval_tool",
-                            query=term,
-                            status="ok",
-                            note="multi-hop follow-up query",
-                            payload={"result_count": len(results), "resolved_entity": resolved_entity},
-                        )
-                        if results:
-                            ctx.retrieved_data.extend(results)
-                            ctx.log(f"  Retrieved {len(results)} articles for '{term}'")
-                            break
-                finally:
-                    config.USE_ORCHESTRATION = old_flag
+                for term in search_terms[:2]:  # Try top 2 variations
+                    results = self._retrieve_without_orchestration(term, top_k=3)
+                    ctx.record_excursion(
+                        step="resolve",
+                        mode="retrieval_tool",
+                        query=term,
+                        status="ok",
+                        note="multi-hop follow-up query",
+                        payload={"result_count": len(results), "resolved_entity": resolved_entity},
+                    )
+                    if results:
+                        ctx.retrieved_data.extend(results)
+                        ctx.log(f"  Retrieved {len(results)} articles for '{term}'")
+                        break
             else:
                 ctx.log("  No indirect references detected")
                 
@@ -253,12 +276,7 @@ class OrchestrationModule:
         """Execute title-based search using existing retrieval."""
         try:
             # Use existing retrieve() but with orchestration disabled to avoid recursion
-            old_flag = config.USE_ORCHESTRATION
-            config.USE_ORCHESTRATION = False
-            try:
-                results = self.retrieve(ctx.original_query, top_k=10)
-            finally:
-                config.USE_ORCHESTRATION = old_flag
+            results = self._retrieve_without_orchestration(ctx.original_query, top_k=10)
             ctx.record_excursion(
                 step="search",
                 mode="local_retrieval",
@@ -379,22 +397,17 @@ class OrchestrationModule:
             
             if expansions:
                 # Search for each expansion
-                old_flag = config.USE_ORCHESTRATION
-                config.USE_ORCHESTRATION = False
-                try:
-                    for term in expansions[:3]:  # Limit to 3 expansions
-                        results = self.retrieve(term, top_k=3)
-                        ctx.retrieved_data.extend(results)
-                        ctx.record_excursion(
-                            step="expand",
-                            mode="retrieval_tool",
-                            query=term,
-                            status="ok",
-                            note="query expansion attempt",
-                            payload={"result_count": len(results)},
-                        )
-                finally:
-                    config.USE_ORCHESTRATION = old_flag
+                for term in expansions[:3]:  # Limit to 3 expansions
+                    results = self._retrieve_without_orchestration(term, top_k=3)
+                    ctx.retrieved_data.extend(results)
+                    ctx.record_excursion(
+                        step="expand",
+                        mode="retrieval_tool",
+                        query=term,
+                        status="ok",
+                        note="query expansion attempt",
+                        payload={"result_count": len(results)},
+                    )
                 ctx.log(f"  Expanded search with {len(expansions[:3])} alternative queries")
             else:
                 ctx.log("  No expansions generated")
@@ -412,25 +425,20 @@ class OrchestrationModule:
             return
             
         try:
-            old_flag = config.USE_ORCHESTRATION
-            config.USE_ORCHESTRATION = False
-            try:
-                # Use suggested searches if available, otherwise use entity names
-                search_terms = suggested[:5] if suggested else missing[:3]
-                
-                for term in search_terms:
-                    results = self.retrieve(term, top_k=2)
-                    ctx.retrieved_data.extend(results)
-                    ctx.record_excursion(
-                        step="targeted_search",
-                        mode="retrieval_tool",
-                        query=term,
-                        status="ok",
-                        note="coverage gap targeted lookup",
-                        payload={"result_count": len(results), "missing_count": len(missing)},
-                    )
-            finally:
-                config.USE_ORCHESTRATION = old_flag
+            # Use suggested searches if available, otherwise use entity names
+            search_terms = suggested[:5] if suggested else missing[:3]
+
+            for term in search_terms:
+                results = self._retrieve_without_orchestration(term, top_k=2)
+                ctx.retrieved_data.extend(results)
+                ctx.record_excursion(
+                    step="targeted_search",
+                    mode="retrieval_tool",
+                    query=term,
+                    status="ok",
+                    note="coverage gap targeted lookup",
+                    payload={"result_count": len(results), "missing_count": len(missing)},
+                )
             ctx.log(f"  Targeted search for {len(search_terms)} missing entities")
             
         except Exception as e:
