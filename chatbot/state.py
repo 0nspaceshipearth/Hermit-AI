@@ -147,6 +147,10 @@ class HermitContext:
 
     # Compact objective/frontier/risk + residue frame (single object, continuously refreshed)
     ofr_residue: Optional[ObjectiveFrontierRiskResidue] = None
+
+    _VALID_STEP_STATUS = {"ok", "skipped", "error", "info"}
+    _VALID_ARTIFACT_STATUS = {"ok", "error", "skipped"}
+    _VALID_ARTIFACT_MODES = {"local_retrieval", "retrieval_tool"}
     
     def log(self, message: str) -> None:
         """
@@ -200,10 +204,11 @@ class HermitContext:
     
     def add_residue(self, step: str, status: str, note: str = "", metrics: Optional[Dict[str, float]] = None) -> None:
         """Append a compact residue record for post-hoc reasoning/debugging."""
+        normalized_status = self._normalize_status(status, allowed=self._VALID_STEP_STATUS, fallback="info")
         self.residue.append(
             ResidueEntry(
                 step=step,
-                status=status,
+                status=normalized_status,
                 note=note,
                 metrics=metrics or {},
             )
@@ -218,11 +223,12 @@ class HermitContext:
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Append a minimal blackboard event for observability and replay."""
+        normalized_status = self._normalize_status(status, allowed=self._VALID_STEP_STATUS, fallback="info")
         self.events.append(
             BlackboardEvent(
                 kind=kind,
                 step=step,
-                status=status,
+                status=normalized_status,
                 message=message,
                 payload=payload or {},
             )
@@ -238,26 +244,53 @@ class HermitContext:
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Append a compact, typed artifact for retrieval/tool excursions."""
+        normalized_mode = self._normalize_mode(mode)
+        normalized_status = self._normalize_status(status, allowed=self._VALID_ARTIFACT_STATUS, fallback="ok")
+        normalized_payload = self._normalize_payload(payload)
+        normalized_query = (query or "").strip()
+
         envelope = ExcursionArtifact(
             step=step,
-            mode=mode,
-            query=query,
-            status=status,
+            mode=normalized_mode,
+            query=normalized_query,
+            status=normalized_status,
             note=note,
-            payload=payload or {},
+            payload=normalized_payload,
         )
         self.artifacts.append(envelope)
         self.emit_event(
             kind="excursion",
             step=step,
-            status=status,
+            status=normalized_status,
             message=note,
             payload={
-                "mode": mode,
-                "query": query,
-                **(payload or {}),
+                "mode": normalized_mode,
+                "query": normalized_query,
+                **normalized_payload,
             },
         )
+
+    def _normalize_status(self, status: str, allowed: set, fallback: str) -> str:
+        value = (status or "").strip().lower()
+        return value if value in allowed else fallback
+
+    def _normalize_mode(self, mode: str) -> str:
+        value = (mode or "").strip().lower()
+        if value in self._VALID_ARTIFACT_MODES:
+            return value
+        return "retrieval_tool" if "tool" in value else "local_retrieval"
+
+    def _normalize_payload(self, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not payload:
+            return {}
+
+        normalized: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                normalized[key] = value
+            else:
+                normalized[key] = repr(value)
+        return normalized
 
     def set_route(self, route: GoalRoute) -> None:
         """Apply goal-driven route decision to this context."""

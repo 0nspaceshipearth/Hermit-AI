@@ -33,3 +33,9 @@ cd Hermit-AI
 ```
 
 grab a .zim file from [kiwix.org](https://library.kiwix.org/), drop it in the folder, run `hermit`.
+
+### runtime controls (cli + gui)
+
+- `mode [classic|wave]` / `/mode [classic|wave]`: switch runtime architecture
+- `tree` / `/tree`: inspect active model/joint routing tree
+- `status` / `/status`: backend + rag health, including latest orchestration route/risk/residue summary

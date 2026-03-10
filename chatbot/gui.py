@@ -3254,6 +3254,7 @@ Keyboard Shortcuts:
         from chatbot.chat import get_rag_system
         rag = get_rag_system()
         
+        orchestration_detail = "No orchestration run yet in this session."
         if rag:
             rag_status = "Active"
             count_docs = len(rag.indexed_paths) if rag.indexed_paths else 0
@@ -3263,6 +3264,18 @@ Keyboard Shortcuts:
             if rag.faiss_index:
                  rag_detail += f"\nVectors: {rag.faiss_index.ntotal}"
 
+            ostatus = getattr(rag, "last_orchestration_status", {}) or {}
+            if ostatus:
+                artifact_summary = ostatus.get("artifact_summary", {})
+                orchestration_detail = (
+                    f"Goal: {ostatus.get('active_goal', 'n/a')}\n"
+                    f"Route: {ostatus.get('mode', 'n/a')} ({ostatus.get('routing_reason', 'n/a')})\n"
+                    f"Risk: {ostatus.get('ofr_risk', 'unknown')}\n"
+                    f"Steps: {ostatus.get('steps_executed', 0)} executed / {ostatus.get('steps_remaining', 0)} remaining\n"
+                    f"Residue/events: {ostatus.get('residue_count', 0)}/{ostatus.get('events_count', 0)}\n"
+                    f"Excursions: {artifact_summary.get('count', 0)}"
+                )
+
         msg = (
             f"=== SYSTEM STATUS ===\n\n"
             f"AI BACKEND: {backend_type}\n"
@@ -3270,6 +3283,8 @@ Keyboard Shortcuts:
             f"{model_status}\n\n"
             f"KNOWLEDGE BASE (RAG): {rag_status}\n"
             f"{rag_detail}\n\n"
+            f"ORCHESTRATION:\n"
+            f"{orchestration_detail}\n\n"
             f"GUI Mode: {'Link Search' if self.link_mode else 'Chat Response'}\n"
             f"Theme: {self.theme_name} ({'Dark' if self.dark_mode else 'Light'})"
         )

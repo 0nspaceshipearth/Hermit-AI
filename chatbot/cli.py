@@ -108,6 +108,47 @@ class ChatbotCLI(cmd.Cmd):
                 print(f"- {label}: {getattr(config, attr, '(unset)')}")
         print("")
 
+    def do_status(self, arg):
+        """Show backend, RAG, and orchestration status."""
+        backend_type = "External API" if config.API_MODE else "Local (GGUF)"
+        backend_detail = f"URL: {config.API_BASE_URL}" if config.API_MODE else "Engine: llama-cpp-python"
+
+        print("\nHermit Status")
+        print("=============")
+        print(f"Backend: {backend_type}")
+        print(backend_detail)
+        print(f"Runtime mode: {getattr(config, 'RUNTIME_MODE', 'classic')}")
+        print(f"Model: {self.model_name}")
+
+        if not self.rag:
+            print("\nRAG: Inactive")
+            print("Orchestration: Unavailable")
+            print("")
+            return
+
+        count_docs = len(self.rag.indexed_paths) if getattr(self.rag, 'indexed_paths', None) else 0
+        count_chunks = len(self.rag.doc_chunks) if getattr(self.rag, 'doc_chunks', None) else 0
+
+        print("\nRAG: Active")
+        print(f"JIT Index: {count_docs} articles ({count_chunks} chunks)")
+        print(f"Encoder: {self.rag.model_name}")
+        if getattr(self.rag, 'faiss_index', None):
+            print(f"Vectors: {self.rag.faiss_index.ntotal}")
+
+        ostatus = getattr(self.rag, 'last_orchestration_status', {}) or {}
+        print("\nOrchestration:")
+        if not ostatus:
+            print("No orchestration run yet in this session.")
+        else:
+            print(f"- Goal: {ostatus.get('active_goal', 'n/a')}")
+            print(f"- Route: {ostatus.get('mode', 'n/a')} ({ostatus.get('routing_reason', 'n/a')})")
+            print(f"- Risk: {ostatus.get('ofr_risk', 'unknown')}")
+            print(f"- Steps: {ostatus.get('steps_executed', 0)} executed / {ostatus.get('steps_remaining', 0)} remaining")
+            print(f"- Residue/events: {ostatus.get('residue_count', 0)}/{ostatus.get('events_count', 0)}")
+            artifact_summary = ostatus.get('artifact_summary', {})
+            print(f"- Excursions: {artifact_summary.get('count', 0)}")
+        print("")
+
     def do_search(self, arg):
         """Search for articles: search <query>"""
         if not arg:
