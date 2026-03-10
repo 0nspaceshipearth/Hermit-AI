@@ -3022,13 +3022,15 @@ class ChatbotGUI:
             config.API_MODEL_NAME = getattr(config, "CODEX_CLOUD_DEFAULT_MODEL", "gpt-5.3-codex")
         self.model = config.API_MODEL_NAME
         self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+        # Codex backend streaming event shapes can drift; keep turbo stable with blocking requests.
+        self.streaming_enabled = False
 
         self.history.clear()
         self.query_history.clear()
         clear_runtime_memory(reset_rag=False)
         ModelManager.close_all()
 
-        self.append_message("system", f"Turbo enabled. Provider/API mode active on model: {self.model}")
+        self.append_message("system", f"Turbo enabled. Provider/API mode active on model: {self.model} (streaming disabled for stability)")
         self.update_status(f"Turbo: {self.model}")
         return True
 
