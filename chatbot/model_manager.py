@@ -949,9 +949,12 @@ class ModelManager:
         In wave mode, all local inference collapses onto the selected default model.
         """
         requested_repo_id = repo_id
+        requested_n_ctx = n_ctx
         if cls._wave_mode_enabled() and not config.API_MODE:
             repo_id = getattr(config, "DEFAULT_MODEL", repo_id)
             prefer_default = False
+            pinned_ctx = int(getattr(config, "WAVE_PIN_CONTEXT_SIZE", 12288) or 12288)
+            n_ctx = max(n_ctx, pinned_ctx)
         model_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
 
         try:
@@ -1015,7 +1018,7 @@ class ModelManager:
                     ):
                         print(
                             f"Reusing loaded model {model_name} "
-                            f"(active ctx={active.get('n_ctx')}, requested ctx={n_ctx})"
+                            f"(active ctx={active.get('n_ctx')}, requested ctx={requested_n_ctx}, effective ctx={n_ctx})"
                         )
                         return active_instance
 

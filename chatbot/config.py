@@ -66,8 +66,10 @@ USE_JOINTS = True
 
 # Runtime architecture mode:
 #   classic = aggressive unload/reload between model tiers (stable default)
-#   wave    = keep loaded tiers hot in memory and simulate resets at the prompt/state level
+#   wave    = keep a single selected model hot and simulate resets at the prompt/state level
 RUNTIME_MODE = "classic"
+# In wave mode, pin a larger context so the same resident model survives context growth.
+WAVE_PIN_CONTEXT_SIZE = 12288
 
 # Optional aux-task reuse: if the default model is already loaded, some helper tasks
 # may reuse it to avoid load/unload thrash. Large defaults stay blocked by default.
