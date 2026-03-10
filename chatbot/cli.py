@@ -23,7 +23,7 @@ import cmd
 import shlex
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import libzim
 
 from chatbot.rag import RAGSystem, TextProcessor
@@ -488,6 +488,36 @@ class ChatbotCLI(cmd.Cmd):
         """Exit the CLI."""
         return self.do_quit(arg)
 
+    def _compact_artifact_payload(self, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Trim checkpoint payloads so residue stays small and resumable."""
+        if not isinstance(payload, dict):
+            return {}
+
+        max_text = 800
+        max_items = 8
+
+        def _trim(value: Any) -> Any:
+            if isinstance(value, str):
+                text = value.strip()
+                if len(text) <= max_text:
+                    return text
+                return text[: max_text - 3] + "..."
+            if isinstance(value, dict):
+                compact: Dict[str, Any] = {}
+                for idx, (k, v) in enumerate(value.items()):
+                    if idx >= max_items:
+                        compact["_truncated_keys"] = len(value) - max_items
+                        break
+                    compact[str(k)] = _trim(v)
+                return compact
+            if isinstance(value, list):
+                if len(value) > max_items:
+                    return [_trim(v) for v in value[:max_items]] + [f"... ({len(value) - max_items} more)"]
+                return [_trim(v) for v in value]
+            return value
+
+        return _trim(payload)
+
     def _record_chamber_artifact(self, envelope, status: str, note: str, payload: Optional[dict] = None):
         """Persist a compact teleport artifact into the runtime checkpoint."""
         checkpoint = load_runtime_checkpoint()
@@ -498,7 +528,7 @@ class ChatbotCLI(cmd.Cmd):
             "query": envelope.objective,
             "status": status,
             "note": note,
-            "payload": payload or {},
+            "payload": self._compact_artifact_payload(payload),
         })
         checkpoint["artifacts"] = artifacts[-8:]
         checkpoint["objective"] = checkpoint.get("objective") or "shell_chamber_execution"

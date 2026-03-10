@@ -91,6 +91,25 @@ class TestCliCheckpointArtifacts(unittest.TestCase):
             self.assertEqual(latest["mode"], "script_create")
             self.assertEqual(latest["status"], "ok")
 
+    def test_shell_artifact_payload_is_compacted_for_checkpoint(self):
+        envelope = TeleportEnvelope(
+            contract_version="teleport.v1",
+            intent="shell_command",
+            source_mode="wave",
+            target_mode="chamber",
+            objective="python3 -c \"print('x'*2000)\"",
+            constraints={"command": "python3 -c \"print('x'*2000)\""},
+        )
+
+        self.cli._execute_teleport(envelope)
+        checkpoint = load_runtime_checkpoint()
+        latest = checkpoint["artifacts"][-1]
+        payload = latest.get("payload", {})
+
+        self.assertIn("stdout", payload)
+        self.assertLessEqual(len(payload["stdout"]), 800)
+        self.assertTrue(payload["stdout"].endswith("..."))
+
 
 if __name__ == "__main__":
     unittest.main()
