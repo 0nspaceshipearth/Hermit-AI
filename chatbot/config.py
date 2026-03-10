@@ -52,6 +52,7 @@ API_MODE = False  # If True, use external API instead of local GGUF
 API_BASE_URL = "http://localhost:1234/v1"  # Default (LM Studio / Ollama)
 API_KEY = "lm-studio"  # Often ignored by local servers but required by spec
 API_MODEL_NAME = "local-model"  # Passed in API request
+API_ACCOUNT_ID = ""  # Optional ChatGPT account id for Codex OAuth flows
 
 # Codex/OpenAI cloud auth / provider menu
 CODEX_CLOUD_PROVIDER = "openai-codex"

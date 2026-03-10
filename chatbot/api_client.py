@@ -10,16 +10,32 @@ from typing import List, Dict, Generator, Any, Union
 
 from chatbot import config
 
+
 class OpenAIClientWrapper:
     """
     Polymorphic wrapper that mimics llama_cpp.Llama but calls an API.
     """
-    
+
     def __init__(self, base_url: str, api_key: str, model_name: str):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.model_name = model_name
         print(f"Initialized API Client: {self.base_url} (Model: {self.model_name})")
+
+    def _is_codex_oauth_mode(self) -> bool:
+        # Codex OAuth tokens are not standard sk- API keys.
+        key = (self.api_key or "").strip()
+        return self.base_url.startswith("https://api.openai.com") and bool(key) and not key.startswith("sk-")
+
+    def _chat_headers(self) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        account_id = getattr(config, "API_ACCOUNT_ID", "")
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+        return headers
 
     def create_chat_completion(
         self,
@@ -33,57 +49,57 @@ class OpenAIClientWrapper:
         """
         Mimics llama_cpp.Llama.create_chat_completion
         """
-        
-        url = f"{self.base_url}/chat/completions"
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
+
         # approximate mapping for repeat_penalty if present in kwargs
         presence_penalty = 0.0
         if "repeat_penalty" in kwargs:
-             # loose mapping: 1.1 -> 0.1, 1.2 -> 0.2
-             presence_penalty = max(0.0, kwargs["repeat_penalty"] - 1.0)
-
-        payload = {
-            "model": self.model_name,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": stream,
-            "presence_penalty": presence_penalty
-        }
-        
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
-            
-        # Add grammar if present (Ollama supports this, others might)
-        if "grammar" in kwargs:
-            # Check if this specific backend assumes a 'grammar' field or 'response_format'
-            # For now, we'll try to pass it if the user is using a backend that supports it
-            pass 
+            # loose mapping: 1.1 -> 0.1, 1.2 -> 0.2
+            presence_penalty = max(0.0, kwargs["repeat_penalty"] - 1.0)
 
         try:
+            if self._is_codex_oauth_mode():
+                if stream:
+                    return self._stream_responses(messages, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+                return self._blocking_responses(messages, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+
+            # Default OpenAI-compatible chat/completions path
+            url = f"{self.base_url}/chat/completions"
+            headers = self._chat_headers()
+            payload = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stream": stream,
+                "presence_penalty": presence_penalty
+            }
+
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+
             print(f"DEBUG: Requesting URL: {url}")
             if stream:
                 return self._stream_request(url, headers, payload)
             else:
                 return self._blocking_request(url, headers, payload)
+
         except Exception as e:
             print(f"API Request Failed: {e}", file=sys.stderr)
             raise RuntimeError(f"API Connection Error: {e}")
 
     def _blocking_request(self, url, headers, payload):
         response = requests.post(url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            body = response.text[:500]
+            raise RuntimeError(f"HTTP {response.status_code} {response.reason}: {body}")
         return response.json()
 
     def _stream_request(self, url, headers, payload):
         response = requests.post(url, headers=headers, json=payload, stream=True, timeout=60)
-        response.raise_for_status()
-        
+        if response.status_code >= 400:
+            body = response.text[:500]
+            raise RuntimeError(f"HTTP {response.status_code} {response.reason}: {body}")
+
         for line in response.iter_lines():
             if line:
                 line = line.decode('utf-8')
@@ -96,3 +112,97 @@ class OpenAIClientWrapper:
                         yield chunk
                     except json.JSONDecodeError:
                         continue
+
+    def _blocking_responses(self, messages, max_tokens=None, temperature=0.7, top_p=0.95):
+        url = f"{self.base_url}/responses"
+        headers = self._chat_headers()
+        payload = {
+            "model": self.model_name,
+            "input": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if max_tokens:
+            payload["max_output_tokens"] = max_tokens
+
+        print(f"DEBUG: Requesting URL: {url}")
+        response = requests.post(url, headers=headers, json=payload, timeout=90)
+        if response.status_code >= 400:
+            body = response.text[:500]
+            raise RuntimeError(f"HTTP {response.status_code} {response.reason}: {body}")
+
+        data = response.json()
+        text = self._extract_responses_text(data)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": text
+                    }
+                }
+            ]
+        }
+
+    def _stream_responses(self, messages, max_tokens=None, temperature=0.7, top_p=0.95):
+        url = f"{self.base_url}/responses"
+        headers = self._chat_headers()
+        payload = {
+            "model": self.model_name,
+            "input": messages,
+            "stream": True,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if max_tokens:
+            payload["max_output_tokens"] = max_tokens
+
+        print(f"DEBUG: Requesting URL: {url}")
+        response = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
+        if response.status_code >= 400:
+            body = response.text[:500]
+            raise RuntimeError(f"HTTP {response.status_code} {response.reason}: {body}")
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            raw = line.decode("utf-8", errors="ignore")
+            if not raw.startswith("data: "):
+                continue
+            data = raw[6:]
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            etype = (event.get("type") or "").lower()
+            if etype == "response.output_text.delta":
+                delta = event.get("delta", "")
+                if delta:
+                    yield {"choices": [{"delta": {"content": delta}}]}
+            elif etype in {"response.completed", "response.done"}:
+                break
+
+    def _extract_responses_text(self, data: Dict[str, Any]) -> str:
+        # Newer responses payloads often include output_text directly.
+        direct = data.get("output_text")
+        if isinstance(direct, str):
+            return direct
+
+        # Fallback: walk output[].content[].text
+        output = data.get("output", [])
+        chunks = []
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content", [])
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        text = part.get("text")
+                        if isinstance(text, str) and text:
+                            chunks.append(text)
+        return "".join(chunks).strip()
