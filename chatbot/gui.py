@@ -22,9 +22,11 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import threading
-import webbrowser
 from typing import List, Tuple, Optional
 from urllib.request import Request, urlopen
 
@@ -1336,6 +1338,30 @@ class ChatbotGUI:
         )
         self._render_terminal_menu(text)
 
+    def _launch_interactive_terminal(self, command: str) -> bool:
+        """Launch an interactive terminal window for commands that require a TTY."""
+        wrapped = f"{command}; echo; echo '[Hermit] Press Enter to close...'; read _"
+
+        launchers = []
+        if shutil.which("x-terminal-emulator"):
+            launchers.append(["x-terminal-emulator", "-e", "bash", "-lc", wrapped])
+        if shutil.which("gnome-terminal"):
+            launchers.append(["gnome-terminal", "--", "bash", "-lc", wrapped])
+        if shutil.which("konsole"):
+            launchers.append(["konsole", "-e", "bash", "-lc", wrapped])
+        if shutil.which("xfce4-terminal"):
+            launchers.append(["xfce4-terminal", "--command", f"bash -lc {shlex.quote(wrapped)}"])
+        if shutil.which("xterm"):
+            launchers.append(["xterm", "-e", f"bash -lc {shlex.quote(wrapped)}"])
+
+        for launcher in launchers:
+            try:
+                subprocess.Popen(launcher, cwd=os.path.expanduser("~"))
+                return True
+            except Exception:
+                continue
+        return False
+
     def _activate_cloud_provider(self, provider: str):
         expected = getattr(config, "CODEX_CLOUD_PROVIDER", "openai-codex")
         if provider != expected:
@@ -1343,32 +1369,12 @@ class ChatbotGUI:
             return
 
         login_command = getattr(config, "CODEX_CLOUD_LOGIN_COMMAND", "openclaw models auth login --provider openai-codex")
-        self.append_message("system", f"Starting Codex auth via OpenClaw: {login_command}")
+        if self._launch_interactive_terminal(login_command):
+            self.append_message("system", "Opened an interactive terminal for Codex auth. Complete login there, then return to Hermit.")
+        else:
+            self.append_message("system", "Could not open a terminal window automatically.")
+            self.append_message("system", f"Run this manually in your terminal: {login_command}")
 
-        def run_login():
-            try:
-                proc = subprocess.Popen(
-                    login_command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                output_lines = []
-                if proc.stdout:
-                    for line in proc.stdout:
-                        if line:
-                            output_lines.append(line.rstrip())
-                proc.wait()
-                if proc.returncode == 0:
-                    self._post_system("Codex auth completed. You can now pick Codex/OpenAI cloud models in /model.")
-                else:
-                    joined = "\n".join(output_lines[-8:]).strip()
-                    self._post_system(f"Codex auth failed (exit {proc.returncode}).{chr(10) + joined if joined else ''}")
-            except Exception as e:
-                self._post_system(f"Failed to start Codex auth flow: {e}")
-
-        threading.Thread(target=run_login, daemon=True).start()
         self._close_command_mode()
 
     def _handle_cloud_input(self, user_input: str):
