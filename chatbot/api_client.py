@@ -120,16 +120,38 @@ class OpenAIClientWrapper:
                     except json.JSONDecodeError:
                         continue
 
+    def _build_codex_responses_payload(self, messages, stream=False, max_tokens=None, temperature=0.7, top_p=0.95):
+        instructions = "You are a helpful assistant."
+        user_input = []
+
+        for msg in messages or []:
+            role = str(msg.get("role", "user"))
+            content = msg.get("content", "")
+            if role == "system" and isinstance(content, str) and content.strip():
+                instructions = content.strip()
+                continue
+            user_input.append({
+                "role": role,
+                "content": [{"type": "input_text", "text": str(content)}],
+            })
+
+        payload = {
+            "model": self.model_name,
+            "instructions": instructions,
+            "input": user_input,
+            "stream": stream,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if max_tokens:
+            payload["max_output_tokens"] = max_tokens
+        return payload
+
     def _blocking_responses(self, messages, max_tokens=None, temperature=0.7, top_p=0.95):
         path = "/codex/responses" if self.base_url.startswith("https://chatgpt.com/backend-api") else "/responses"
         url = f"{self.base_url}{path}"
         headers = self._chat_headers()
-        payload = {
-            "model": self.model_name,
-            "input": messages,
-            "temperature": temperature,
-            "top_p": top_p,
-        }
+        payload = self._build_codex_responses_payload(messages, stream=False, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
         if max_tokens:
             payload["max_output_tokens"] = max_tokens
 
@@ -155,15 +177,7 @@ class OpenAIClientWrapper:
         path = "/codex/responses" if self.base_url.startswith("https://chatgpt.com/backend-api") else "/responses"
         url = f"{self.base_url}{path}"
         headers = self._chat_headers()
-        payload = {
-            "model": self.model_name,
-            "input": messages,
-            "stream": True,
-            "temperature": temperature,
-            "top_p": top_p,
-        }
-        if max_tokens:
-            payload["max_output_tokens"] = max_tokens
+        payload = self._build_codex_responses_payload(messages, stream=True, max_tokens=max_tokens, temperature=temperature, top_p=top_p)
 
         print(f"DEBUG: Requesting URL: {url}")
         response = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
