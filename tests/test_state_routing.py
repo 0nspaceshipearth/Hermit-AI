@@ -1,6 +1,12 @@
 import unittest
 
-from chatbot.state import HermitContext, RoutingDirective, route_plan_for_goal
+from chatbot.state import (
+    HermitContext,
+    RoutingDirective,
+    classify_routing_mode,
+    detect_gap_routing,
+    route_plan_for_goal,
+)
 
 
 class TestStateRouting(unittest.TestCase):
@@ -72,6 +78,33 @@ class TestStateRouting(unittest.TestCase):
         self.assertEqual(snapshot["base_mind"]["objective"], "factual_lookup")
         self.assertIn("routing", snapshot["base_mind"])
         self.assertIn("steps", snapshot["base_mind"])
+
+    def test_classify_routing_mode_detects_freshness_intent(self):
+        directive = classify_routing_mode("What is the latest Python version?")
+
+        self.assertEqual(directive.mode, "retrieval_tools")
+        self.assertEqual(directive.reason, "freshness_or_live_intent_detected")
+
+    def test_detect_gap_routing_escalates_for_empty_search(self):
+        ctx = HermitContext(original_query="test")
+
+        directive = detect_gap_routing(ctx, step="search")
+
+        self.assertIsNotNone(directive)
+        self.assertEqual(directive.mode, "retrieval_tools")
+        self.assertEqual(directive.reason, "no_initial_hits")
+
+    def test_detect_gap_routing_escalates_for_low_coverage(self):
+        ctx = HermitContext(original_query="test")
+        ctx.retrieved_data = [{"title": "Python"}]
+        ctx.signals["highest_source_score"] = 7.0
+        ctx.signals["coverage_ratio"] = 0.2
+
+        directive = detect_gap_routing(ctx, step="verify")
+
+        self.assertIsNotNone(directive)
+        self.assertEqual(directive.mode, "retrieval_tools")
+        self.assertEqual(directive.reason, "low_quality_or_coverage_gap")
 
 
 if __name__ == "__main__":
