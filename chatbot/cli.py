@@ -563,6 +563,53 @@ class ChatbotCLI(cmd.Cmd):
             full_response += chunk
         return full_response
 
+    def _run_follow_up_commands(self, initial_response: str, max_rounds: int = 5) -> str:
+        """Execute chained [HERMIT_CMD] commands until no further command is requested."""
+        full_response = initial_response
+        rounds = 0
+
+        while rounds < max_rounds:
+            follow_up_cmd = self._extract_agent_command(full_response)
+            if not follow_up_cmd:
+                break
+
+            rounds += 1
+            print(f"\n📡 Follow-up command: {follow_up_cmd}")
+            follow_envelope = TeleportEnvelope(
+                contract_version="teleport.v1",
+                intent="shell_command",
+                source_mode="wave",
+                target_mode="chamber",
+                objective=follow_up_cmd,
+                constraints={
+                    "workspace": str(self.cwd),
+                    "command": follow_up_cmd,
+                    "requires_confirmation": False,
+                    "allow_prose_fallback": False,
+                },
+            )
+            follow_result = self._execute_teleport(follow_envelope)
+            if follow_result is None:
+                break
+
+            print(follow_result)
+            observation = (
+                f"[SHELL CHAMBER OBSERVATION]\n"
+                f"Follow-up command: {follow_up_cmd}\n"
+                f"Result:\n{follow_result}\n"
+                f"[/SHELL CHAMBER OBSERVATION]\n\n"
+                f"Continue summarizing. If you need another command, use [HERMIT_CMD]...[/HERMIT_CMD]."
+            )
+            self.history.append(Message(role="assistant", content=full_response))
+            self.history.append(Message(role="user", content=observation))
+            messages = build_messages(config.SYSTEM_PROMPT, self.history)
+
+            print(f"\nHermit: ", end="", flush=True)
+            full_response = self._agentic_generate(messages)
+            print("\n")
+
+        return full_response
+
     def _extract_agent_command(self, response):
         """Extract a [HERMIT_CMD]...[/HERMIT_CMD] block from LLM output.
 
@@ -745,46 +792,7 @@ class ChatbotCLI(cmd.Cmd):
                     full_response = self._agentic_generate(messages)
                     print("\n")
 
-                    # Agent loop: LLM can request follow-up commands (max 5 rounds)
-                    for _round in range(5):
-                        follow_up_cmd = self._extract_agent_command(full_response)
-                        if not follow_up_cmd:
-                            break
-
-                        print(f"\n📡 Follow-up command: {follow_up_cmd}")
-                        follow_envelope = TeleportEnvelope(
-                            contract_version="teleport.v1",
-                            intent="shell_command",
-                            source_mode="wave",
-                            target_mode="chamber",
-                            objective=follow_up_cmd,
-                            constraints={
-                                "workspace": str(self.cwd),
-                                "command": follow_up_cmd,
-                                "requires_confirmation": False,
-                                "allow_prose_fallback": False,
-                            },
-                        )
-                        follow_result = self._execute_teleport(follow_envelope)
-                        if follow_result is None:
-                            break
-
-                        print(follow_result)
-                        observation = (
-                            f"[SHELL CHAMBER OBSERVATION]\n"
-                            f"Follow-up command: {follow_up_cmd}\n"
-                            f"Result:\n{follow_result}\n"
-                            f"[/SHELL CHAMBER OBSERVATION]\n\n"
-                            f"Continue summarizing. If you need another command, use [HERMIT_CMD]...[/HERMIT_CMD]."
-                        )
-                        self.history.append(Message(role="assistant", content=full_response))
-                        self.history.append(Message(role="user", content=observation))
-                        messages = build_messages(config.SYSTEM_PROMPT, self.history)
-
-                        print(f"\nHermit: ", end="", flush=True)
-                        full_response = self._agentic_generate(messages)
-                        print("\n")
-
+                    full_response = self._run_follow_up_commands(full_response, max_rounds=5)
                     self.history.append(Message(role="assistant", content=full_response))
                     return
 
@@ -832,6 +840,12 @@ class ChatbotCLI(cmd.Cmd):
                         print(cmd_result)
                         self.history.append(Message(role="assistant", content=full_response))
                         self.history.append(Message(role="user", content=f"[SHELL CHAMBER OBSERVATION]\n{cmd_result}\n[/SHELL CHAMBER OBSERVATION]"))
+                        messages = build_messages(config.SYSTEM_PROMPT, self.history)
+                        print(f"\nHermit: ", end="", flush=True)
+                        full_response = self._agentic_generate(messages)
+                        print("\n")
+                        full_response = self._run_follow_up_commands(full_response, max_rounds=5)
+                        self.history.append(Message(role="assistant", content=full_response))
                         return
 
                 # If this was a file_write intent with an envelope, execute the write now
