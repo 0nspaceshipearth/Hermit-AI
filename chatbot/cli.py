@@ -28,7 +28,7 @@ import libzim
 
 from chatbot.rag import RAGSystem, TextProcessor
 from chatbot import config
-from chatbot.chat import build_messages, build_messages_with_intent, stream_chat, clear_runtime_memory, load_runtime_checkpoint
+from chatbot.chat import build_messages, build_messages_with_intent, stream_chat, clear_runtime_memory, load_runtime_checkpoint, save_runtime_checkpoint
 from chatbot.model_manager import ModelManager
 from chatbot.models import Message
 from chatbot.teleport import (
@@ -489,6 +489,31 @@ class ChatbotCLI(cmd.Cmd):
         """Exit the CLI."""
         return self.do_quit(arg)
 
+    def _record_chamber_artifact(self, envelope, status: str, note: str, payload: Optional[dict] = None):
+        """Persist a compact teleport artifact into the runtime checkpoint."""
+        checkpoint = load_runtime_checkpoint()
+        artifacts = list(checkpoint.get("artifacts", []) or [])
+        artifacts.append({
+            "mode": envelope.intent,
+            "step": "teleport",
+            "query": envelope.objective,
+            "status": status,
+            "note": note,
+            "payload": payload or {},
+        })
+        checkpoint["artifacts"] = artifacts[-8:]
+        checkpoint["objective"] = checkpoint.get("objective") or "shell_chamber_execution"
+        checkpoint["next_step"] = "summarize_artifact"
+        checkpoint["source"] = {
+            **(checkpoint.get("source", {}) or {}),
+            "routing_mode": "shell_chamber",
+            "routing_reason": envelope.intent,
+        }
+        open_loops = list(checkpoint.get("open_loops", []) or [])
+        open_loops.append(note)
+        checkpoint["open_loops"] = open_loops[-5:]
+        save_runtime_checkpoint(checkpoint)
+
     def _execute_teleport(self, envelope):
         """Execute a teleport envelope and return the formatted result string."""
         intent = envelope.intent
@@ -515,8 +540,20 @@ class ChatbotCLI(cmd.Cmd):
         if result.ok:
             output = result.message or "(no output)"
             artifact = result.artifact or {}
+            self._record_chamber_artifact(
+                envelope,
+                "ok",
+                f"command completed (exit={artifact.get('exit_code', 0)})",
+                payload=artifact,
+            )
             return f"✅ Command executed successfully (exit={artifact.get('exit_code', 0)})\n{output}"
         else:
+            self._record_chamber_artifact(
+                envelope,
+                "error",
+                f"execution failed: {result.status}",
+                payload=result.artifact or {"message": result.message},
+            )
             return f"❌ Execution failed: {result.status} — {result.message}"
 
     def _agentic_generate(self, messages):
@@ -538,13 +575,18 @@ class ChatbotCLI(cmd.Cmd):
             return match.group(1).strip()
         return None
 
-    def _extract_file_content(self, response, language: str = None):
+    def _extract_file_content(self, response, language: str = None, require_marker: bool = False):
         """Extract file content from LLM output.
 
         Looks for:
-        1. Content in code fences (```lang ... ```)
-        2. Content in [HERMIT_FILE]...[/HERMIT_FILE] tags
-        3. The entire response if no markers found
+        1. Content in [HERMIT_FILE]...[/HERMIT_FILE] tags
+        2. Content in code fences (```lang ... ```)
+        3. (Optional) the entire response if no markers found
+
+        Args:
+            response: Raw model response
+            language: Optional expected language for fenced blocks
+            require_marker: If True, refuse unmarked prose fallback
 
         Returns:
             (content, found_marker) - extracted content and whether a marker was found
@@ -567,8 +609,10 @@ class ChatbotCLI(cmd.Cmd):
         if any_fence:
             return any_fence.group(1).strip(), True
 
-        # No markers - return the full response (minus any leading/trailing commentary)
-        # But only if it looks like code content
+        # No markers - optionally allow best-effort fallback
+        if require_marker:
+            return None, False
+
         lines = response.strip().split('\n')
         if len(lines) > 1 or any(c in response for c in '{}[]()=;:'):
             return response.strip(), False
@@ -586,7 +630,7 @@ class ChatbotCLI(cmd.Cmd):
             Formatted result string or None if no content found
         """
         language = envelope.constraints.get("language", "")
-        content, found_marker = self._extract_file_content(response, language)
+        content, found_marker = self._extract_file_content(response, language, require_marker=True)
 
         if not content:
             return None
@@ -614,6 +658,12 @@ class ChatbotCLI(cmd.Cmd):
 
         if result.ok:
             artifact = result.artifact or {}
+            self._record_chamber_artifact(
+                envelope,
+                "ok",
+                f"file written: {artifact.get('path', target_path)}",
+                payload=artifact,
+            )
             return (
                 f"✅ File written successfully\n"
                 f"Path: {artifact.get('path', target_path)}\n"
@@ -621,7 +671,28 @@ class ChatbotCLI(cmd.Cmd):
                 f"Type: {artifact.get('kind', 'file')}"
             )
         else:
+            self._record_chamber_artifact(
+                envelope,
+                "error",
+                f"file write failed: {result.status}",
+                payload=result.artifact or {"message": result.message},
+            )
             return f"❌ File write failed: {result.status} — {result.message}"
+
+    def _file_generation_contract(self, envelope: TeleportEnvelope) -> str:
+        """Build strict output instructions for file/script creation flows."""
+        language = envelope.constraints.get("language", "")
+        target_path = envelope.constraints.get("target_path", "")
+        lang_hint = f" ({language})" if language else ""
+        path_hint = f"Target path: {target_path}\n" if target_path else ""
+        return (
+            "\n\nFILE CREATION CONTRACT:\n"
+            f"- You are generating file contents{lang_hint}.\n"
+            f"- {path_hint}"
+            "- Return ONLY the file body wrapped in [HERMIT_FILE]...[/HERMIT_FILE].\n"
+            "- Do not include explanations, prefaces, or markdown outside the tags.\n"
+            "- If the task is impossible, return [HERMIT_FILE]# unable to generate requested file[/HERMIT_FILE].\n"
+        )
 
     def default(self, line):
         """Handle chat interactions — with agentic teleport in wave mode."""
@@ -718,6 +789,16 @@ class ChatbotCLI(cmd.Cmd):
                 # Fall through to normal generation, the system prompt already has instructions
 
             # === NORMAL CHAT PATH ===
+            if (
+                wave_mode_enabled()
+                and intent.shell_intent in ("file_write", "script_create")
+                and intent.teleport_envelope
+                and not intent.teleport_envelope.constraints.get("refused")
+                and messages
+            ):
+                messages = [dict(m) for m in messages]
+                messages[0]["content"] = messages[0].get("content", "") + self._file_generation_contract(intent.teleport_envelope)
+
             print(f"Hermit: ", end="", flush=True)
             full_response = ""
             for chunk in stream_chat(self.model_name, messages):
@@ -759,6 +840,10 @@ class ChatbotCLI(cmd.Cmd):
                         # Add a summary to history
                         summary = f"{full_response}\n\n[System: {write_result}]"
                         self.history.append(Message(role="assistant", content=summary))
+                        return
+                    else:
+                        print("\n❌ File write canceled: model response did not include a valid [HERMIT_FILE] block or code fence.")
+                        self.history.append(Message(role="assistant", content=full_response))
                         return
 
             self.history.append(Message(role="assistant", content=full_response))
