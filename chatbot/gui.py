@@ -24,6 +24,7 @@ from tkinter import ttk, scrolledtext, messagebox
 import json
 import subprocess
 import threading
+import webbrowser
 from typing import List, Tuple, Optional
 from urllib.request import Request, urlopen
 
@@ -804,6 +805,8 @@ class ChatbotGUI:
             self._render_model_menu()
         elif mode == "api":
             self._render_api_menu()
+        elif mode == "cloud":
+            self._render_cloud_menu()
         elif mode == "forge":
             self._render_forge_menu()
 
@@ -818,6 +821,8 @@ class ChatbotGUI:
             self._handle_model_input(user_input)
         elif mode == "api":
             self._handle_api_input(user_input)
+        elif mode == "cloud":
+            self._handle_cloud_input(user_input)
         elif mode == "forge":
             self._handle_forge_input(user_input)
 
@@ -1297,6 +1302,124 @@ class ChatbotGUI:
                 self._post_system(f"API connection error: {e}")
 
         threading.Thread(target=run_test, daemon=True).start()
+
+    def _enter_cloud_mode(self):
+        items = ["openai"]
+        self.command_mode = {
+            "name": "cloud",
+            "type": "menu",
+            "items": items,
+            "display": ["OpenAI"],
+            "index": 0,
+            "pending": None,
+        }
+        self._render_cloud_menu()
+
+    def _render_cloud_menu(self):
+        items = self.command_mode.get("items", [])
+        display = self.command_mode.get("display", [])
+        idx = self.command_mode.get("index", 0)
+        pending = self.command_mode.get("pending")
+        lines = []
+        for i, name in enumerate(items):
+            marker = ">" if i == idx else " "
+            label = display[i] if i < len(display) else name.title()
+            lines.append(f"{marker} {i+1}. {label}")
+
+        if pending:
+            footer = pending.get("prompt", "Paste your API key or Esc to cancel.")
+        else:
+            footer = "Use Up/Down and Enter. Enter opens the browser auth page for the selected provider."
+
+        text = (
+            "CLOUD PROVIDERS\n"
+            "OpenAI-only in this build.\n\n"
+            + "\n".join(lines)
+            + "\n\n"
+            + footer
+        )
+        self._render_terminal_menu(text)
+
+    def _activate_cloud_provider(self, provider: str):
+        if provider != "openai":
+            self.append_message("system", f"Unsupported cloud provider: {provider}")
+            return
+        auth_url = getattr(config, "OPENAI_CLOUD_AUTH_URL", "https://platform.openai.com/settings/organization/api-keys")
+        try:
+            webbrowser.open(auth_url)
+            self.append_message("system", "Opened OpenAI auth in your browser. Create or copy an API key, then paste it here.")
+        except Exception as e:
+            self.append_message("system", f"Could not open browser automatically: {e}. Open this URL manually: {auth_url}")
+
+        self.command_mode["pending"] = {
+            "action": "openai_key",
+            "provider": "openai",
+            "prompt": "Paste your OpenAI API key, or type cancel.",
+        }
+        self._render_cloud_menu()
+
+    def _save_openai_cloud_key(self, api_key: str):
+        key = (api_key or "").strip()
+        if not key:
+            self.append_message("system", "No API key provided.")
+            return
+        if not key.startswith("sk-"):
+            self.append_message("system", "That doesn't look like an OpenAI API key. Expected it to start with 'sk-'.")
+            return
+
+        config.API_MODE = True
+        config.API_BASE_URL = getattr(config, "OPENAI_CLOUD_BASE_URL", "https://api.openai.com/v1")
+        config.API_KEY = key
+        config.API_MODEL_NAME = getattr(config, "OPENAI_CLOUD_DEFAULT_MODEL", "gpt-4.1-mini")
+
+        from chatbot.model_manager import ModelManager
+        ModelManager.close_all()
+
+        self.model = config.API_MODEL_NAME
+        self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+        self.append_message("system", "OpenAI cloud auth saved. Hermit is now using OpenAI API mode.")
+        self.update_status(f"API: {self.model}")
+
+    def _handle_cloud_input(self, user_input: str):
+        text = user_input.strip()
+        lowered = text.lower()
+        pending = self.command_mode.get("pending")
+
+        if pending:
+            if lowered in {"cancel", "exit", "quit"}:
+                self._exit_command_mode(cancelled=True)
+                return
+            self._save_openai_cloud_key(text)
+            self._close_command_mode()
+            return
+
+        if not text:
+            items = self.command_mode.get("items", [])
+            idx = self.command_mode.get("index", 0)
+            if items:
+                self._activate_cloud_provider(items[idx])
+            return
+
+        if lowered in {"cancel", "exit", "quit"}:
+            self._exit_command_mode(cancelled=True)
+            return
+
+        if text.isdigit():
+            idx = int(text) - 1
+            items = self.command_mode.get("items", [])
+            if 0 <= idx < len(items):
+                self.command_mode["index"] = idx
+                self._activate_cloud_provider(items[idx])
+                return
+
+        items = self.command_mode.get("items", [])
+        for i, item in enumerate(items):
+            if lowered == item.lower():
+                self.command_mode["index"] = i
+                self._activate_cloud_provider(item)
+                return
+
+        self.append_message("system", "Unknown cloud provider selection.")
 
     def _enter_forge_mode(self, args_line: Optional[str] = None):
         self.command_mode = {
@@ -2334,7 +2457,7 @@ class ChatbotGUI:
         suggestions: List[str] = []
         text_lower = text.lower()
         
-        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/forge", "/mode"]
+        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/cloud", "/forge", "/mode"]
         
         if text.startswith("/"):
             for cmd in commands:
@@ -2876,6 +2999,7 @@ class ChatbotGUI:
   /tree              Open model/joint system tree
   /status            Show system status
   /api               Configure external API mode
+  /cloud             Open OpenAI cloud auth menu
   /forge             Build a ZIM from local docs
   /mode              Show or change runtime architecture
 
@@ -3045,6 +3169,9 @@ Keyboard Shortcuts:
             return
         if user_input.lower() in ["/api", "/connect"]:
             self._enter_api_mode()
+            return
+        if user_input.lower() == "/cloud":
+            self._enter_cloud_mode()
             return
         if user_input.lower().startswith("/forge"):
             parts = user_input.split(maxsplit=1)

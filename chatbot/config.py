@@ -53,6 +53,11 @@ API_BASE_URL = "http://localhost:1234/v1"  # Default (LM Studio / Ollama)
 API_KEY = "lm-studio"  # Often ignored by local servers but required by spec
 API_MODEL_NAME = "local-model"  # Passed in API request
 
+# OpenAI cloud auth / provider menu
+OPENAI_CLOUD_AUTH_URL = "https://platform.openai.com/settings/organization/api-keys"
+OPENAI_CLOUD_BASE_URL = "https://api.openai.com/v1"
+OPENAI_CLOUD_DEFAULT_MODEL = "gpt-4.1-mini"
+
 # Multi-Joint RAG System Configuration
 USE_JOINTS = True
 
