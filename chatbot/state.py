@@ -14,6 +14,7 @@ signal-based decision making and emergent awareness.
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+import time
 
 
 @dataclass
@@ -33,6 +34,51 @@ class GoalRoute:
     goal: str
     plan: List[str]
     confidence: float = 0.5
+
+
+@dataclass
+class RoutingDirective:
+    """Minimal routing hook decision: stay local or activate retrieval tool-paths."""
+
+    mode: str  # "local_only" | "retrieval_tools"
+    reason: str
+    confidence: float = 0.5
+
+
+@dataclass
+class BlackboardEvent:
+    """Minimal event envelope for blackboard activity."""
+
+    kind: str
+    step: str
+    status: str = "info"
+    message: str = ""
+    timestamp: float = field(default_factory=time.time)
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExcursionArtifact:
+    """Typed envelope for tool/retrieval excursions triggered by orchestration."""
+
+    step: str
+    mode: str  # local_retrieval | retrieval_tool
+    query: str
+    status: str = "ok"
+    note: str = ""
+    timestamp: float = field(default_factory=time.time)
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ObjectiveFrontierRiskResidue:
+    """Compact planning/status frame for downstream inspection."""
+
+    objective: str
+    frontier: List[str] = field(default_factory=list)
+    risk: str = "low"
+    residue: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -67,6 +113,10 @@ class HermitContext:
 
     # Top-level goal selected by router (can evolve over time)
     active_goal: str = "factual_lookup"
+
+    # High-level routing hook (local retrieval vs tool-path assist)
+    routing_mode: str = "local_only"
+    routing_reason: str = "default"
     
     # Extracted Data
     extracted_entities: Optional[Dict[str, Any]] = None
@@ -88,6 +138,15 @@ class HermitContext:
 
     # Residue schema: compact execution trail from the orchestration loop
     residue: List[ResidueEntry] = field(default_factory=list)
+
+    # Blackboard event stream: minimal, append-only orchestration telemetry
+    events: List[BlackboardEvent] = field(default_factory=list)
+
+    # Typed excursion artifacts (tool/local retrieval passes that branched from core plan)
+    artifacts: List[ExcursionArtifact] = field(default_factory=list)
+
+    # Compact objective/frontier/risk + residue frame (single object, continuously refreshed)
+    ofr_residue: Optional[ObjectiveFrontierRiskResidue] = None
     
     def log(self, message: str) -> None:
         """
@@ -150,11 +209,201 @@ class HermitContext:
             )
         )
 
+    def emit_event(
+        self,
+        kind: str,
+        step: str,
+        status: str = "info",
+        message: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append a minimal blackboard event for observability and replay."""
+        self.events.append(
+            BlackboardEvent(
+                kind=kind,
+                step=step,
+                status=status,
+                message=message,
+                payload=payload or {},
+            )
+        )
+
+    def record_excursion(
+        self,
+        step: str,
+        mode: str,
+        query: str,
+        status: str = "ok",
+        note: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append a compact, typed artifact for retrieval/tool excursions."""
+        envelope = ExcursionArtifact(
+            step=step,
+            mode=mode,
+            query=query,
+            status=status,
+            note=note,
+            payload=payload or {},
+        )
+        self.artifacts.append(envelope)
+        self.emit_event(
+            kind="excursion",
+            step=step,
+            status=status,
+            message=note,
+            payload={
+                "mode": mode,
+                "query": query,
+                **(payload or {}),
+            },
+        )
+
     def set_route(self, route: GoalRoute) -> None:
         """Apply goal-driven route decision to this context."""
         self.active_goal = route.goal
         self.current_plan = list(route.plan)
         self.log(f"🧭 Goal route '{route.goal}' selected (confidence={route.confidence:.2f})")
+        self.emit_event(
+            kind="route_selected",
+            step="planner",
+            status="ok",
+            message=f"goal={route.goal}",
+            payload={"confidence": route.confidence, "plan": list(route.plan)},
+        )
+
+    def apply_routing(self, directive: RoutingDirective, step: str = "router") -> None:
+        """Record a routing-hook decision in the blackboard for inspectability."""
+        self.routing_mode = directive.mode
+        self.routing_reason = directive.reason
+        self.log(
+            f"🪝 Routing hook: mode={directive.mode} reason='{directive.reason}' "
+            f"(confidence={directive.confidence:.2f})"
+        )
+        self.emit_event(
+            kind="routing_hook",
+            step=step,
+            status="ok",
+            message=directive.reason,
+            payload={"mode": directive.mode, "confidence": directive.confidence},
+        )
+
+    def update_ofr_residue(self, step: str = "controller", status: str = "info") -> None:
+        """Refresh compact objective/frontier/risk residue frame from current context state."""
+        ambiguity = float(self.signals.get("ambiguity_score", 0.0))
+        highest = float(self.signals.get("highest_source_score", 0.0))
+        coverage = float(self.signals.get("coverage_ratio", 0.0))
+
+        if highest < 4.0 or coverage < 0.5:
+            risk = "high"
+        elif ambiguity > 0.6 or highest < 6.0 or coverage < 0.8:
+            risk = "medium"
+        else:
+            risk = "low"
+
+        last = self.residue[-1] if self.residue else None
+        residue_brief = {
+            "step": step,
+            "status": status,
+            "last_step": last.step if last else "",
+            "last_status": last.status if last else "",
+            "last_note": last.note if last else "",
+            "events": len(self.events),
+            "artifacts": len(self.artifacts),
+        }
+
+        self.ofr_residue = ObjectiveFrontierRiskResidue(
+            objective=self.active_goal,
+            frontier=list(self.current_plan[:3]),
+            risk=risk,
+            residue=residue_brief,
+        )
+
+    def residue_snapshot(self, limit: int = 12) -> Dict[str, Any]:
+        """Return a compact serializable view of residue/events for downstream use."""
+        return {
+            "active_goal": self.active_goal,
+            "routing_mode": self.routing_mode,
+            "routing_reason": self.routing_reason,
+            "objective_frontier_risk": {
+                "objective": self.ofr_residue.objective,
+                "frontier": list(self.ofr_residue.frontier),
+                "risk": self.ofr_residue.risk,
+                "residue": dict(self.ofr_residue.residue),
+                "timestamp": self.ofr_residue.timestamp,
+            } if self.ofr_residue else {},
+            "signals": {
+                "ambiguity_score": float(self.signals.get("ambiguity_score", 0.0)),
+                "highest_source_score": float(self.signals.get("highest_source_score", 0.0)),
+                "coverage_ratio": float(self.signals.get("coverage_ratio", 0.0)),
+            },
+            "residue": [
+                {
+                    "step": r.step,
+                    "status": r.status,
+                    "note": r.note,
+                    "metrics": dict(r.metrics),
+                }
+                for r in self.residue[-limit:]
+            ],
+            "events": [
+                {
+                    "kind": e.kind,
+                    "step": e.step,
+                    "status": e.status,
+                    "message": e.message,
+                    "timestamp": e.timestamp,
+                    "payload": dict(e.payload),
+                }
+                for e in self.events[-limit:]
+            ],
+            "artifacts": [
+                {
+                    "step": a.step,
+                    "mode": a.mode,
+                    "query": a.query,
+                    "status": a.status,
+                    "note": a.note,
+                    "timestamp": a.timestamp,
+                    "payload": dict(a.payload),
+                }
+                for a in self.artifacts[-limit:]
+            ],
+        }
+
+    def orchestration_status_report(self) -> Dict[str, Any]:
+        """Small observability surface for orchestration routing + residue health."""
+        artifact_by_mode: Dict[str, int] = {}
+        artifact_by_status: Dict[str, int] = {}
+        for artifact in self.artifacts:
+            artifact_by_mode[artifact.mode] = artifact_by_mode.get(artifact.mode, 0) + 1
+            artifact_by_status[artifact.status] = artifact_by_status.get(artifact.status, 0) + 1
+
+        latest_artifact = self.artifacts[-1] if self.artifacts else None
+
+        return {
+            "mode": self.routing_mode,
+            "routing_reason": self.routing_reason,
+            "active_goal": self.active_goal,
+            "residue_present": len(self.residue) > 0,
+            "residue_count": len(self.residue),
+            "events_count": len(self.events),
+            "artifact_summary": {
+                "count": len(self.artifacts),
+                "by_mode": artifact_by_mode,
+                "by_status": artifact_by_status,
+                "latest": {
+                    "step": latest_artifact.step,
+                    "mode": latest_artifact.mode,
+                    "status": latest_artifact.status,
+                    "query": latest_artifact.query,
+                    "note": latest_artifact.note,
+                } if latest_artifact else {},
+            },
+            "ofr_risk": self.ofr_residue.risk if self.ofr_residue else "unknown",
+            "steps_executed": int(self.signals.get("step_counter", 0)),
+            "steps_remaining": len(self.current_plan),
+        }
 
     def get_summary(self) -> Dict[str, Any]:
         """
@@ -166,6 +415,8 @@ class HermitContext:
         return {
             "query": self.original_query,
             "active_goal": self.active_goal,
+            "routing_mode": self.routing_mode,
+            "routing_reason": self.routing_reason,
             "steps_executed": int(self.signals["step_counter"]),
             "steps_remaining": len(self.current_plan),
             "plan": self.current_plan,
@@ -173,6 +424,10 @@ class HermitContext:
             "num_results": len(self.retrieved_data),
             "num_logs": len(self.logs),
             "residue_events": len(self.residue),
+            "blackboard_events": len(self.events),
+            "excursion_artifacts": len(self.artifacts),
+            "ofr_risk": self.ofr_residue.risk if self.ofr_residue else "unknown",
+            "status_report": self.orchestration_status_report(),
         }
 
 
@@ -202,3 +457,42 @@ def route_plan_for_goal(query: str, complexity_level: str = "simple") -> GoalRou
         plan=["extract", "search", "score", "verify"],
         confidence=0.80,
     )
+
+
+def classify_routing_mode(query: str, complexity_level: str = "simple") -> RoutingDirective:
+    """Minimal query classifier for local-vs-tool-path routing hooks."""
+    q = (query or "").lower()
+
+    external_hint_tokens = ["latest", "current", "today", "now", "live", "breaking"]
+    pronoun_tokens = [" he ", " she ", " they ", " it ", " his ", " her ", " their "]
+
+    if any(token in q for token in external_hint_tokens):
+        return RoutingDirective(
+            mode="retrieval_tools",
+            reason="freshness_or_live_intent_detected",
+            confidence=0.70,
+        )
+
+    padded = f" {q} "
+    if complexity_level == "complex" or any(token in padded for token in pronoun_tokens):
+        return RoutingDirective(
+            mode="retrieval_tools",
+            reason="reference_resolution_likely_needed",
+            confidence=0.68,
+        )
+
+    return RoutingDirective(mode="local_only", reason="straightforward_local_lookup", confidence=0.82)
+
+
+def detect_gap_routing(ctx: HermitContext, step: str) -> Optional[RoutingDirective]:
+    """Simple context gap detector to escalate into retrieval tool-paths."""
+    if step == "search" and len(ctx.retrieved_data) == 0:
+        return RoutingDirective("retrieval_tools", "no_initial_hits", confidence=0.92)
+
+    if step in ("score", "verify"):
+        highest = float(ctx.signals.get("highest_source_score", 0.0))
+        coverage = float(ctx.signals.get("coverage_ratio", 0.0))
+        if highest < 4.0 or coverage < 0.5:
+            return RoutingDirective("retrieval_tools", "low_quality_or_coverage_gap", confidence=0.78)
+
+    return None

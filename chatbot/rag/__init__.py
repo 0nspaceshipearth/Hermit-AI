@@ -10,7 +10,7 @@ import pickle
 import numpy as np
 import time
 import glob
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple, Set, Any
 
 try:
     import faiss
@@ -131,6 +131,10 @@ class RAGSystem(SearchModule, OrchestrationModule):
         self._comparison_joint = None
         self._filter_joint = None
         self._fact_joint = None
+
+        # Orchestration observability surfaces (updated per retrieval cycle)
+        self.last_orchestration_status: Dict[str, Any] = {}
+        self.last_orchestration_snapshot: Dict[str, Any] = {}
 
         if self.use_joints:
             debug_print("Joint system configured for LAZY initialization")

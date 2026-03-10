@@ -4,7 +4,12 @@ import re
 from typing import List, Dict, Optional, Any
 from chatbot import config
 from chatbot.debug_utils import debug_print
-from chatbot.state import HermitContext, route_plan_for_goal
+from chatbot.state import (
+    HermitContext,
+    route_plan_for_goal,
+    classify_routing_mode,
+    detect_gap_routing,
+)
 from chatbot.intent import classify_query_complexity, QueryComplexity
 
 class OrchestrationModule:
@@ -28,8 +33,23 @@ class OrchestrationModule:
         ctx = HermitContext(original_query=query)
         ctx.complexity = complexity
         ctx.set_route(route_plan_for_goal(query, complexity.level))
+
+        # First routing hook: classify if we should proactively activate tool-paths.
+        routing = classify_routing_mode(query, complexity.level)
+        ctx.apply_routing(routing, step="router_query")
+        if routing.mode == "retrieval_tools" and "resolve" not in ctx.current_plan:
+            ctx.add_step("resolve", priority="high")
+        ctx.update_ofr_residue(step="router_query", status="ok")
+
         ctx.log(f"🚀 Starting orchestrated retrieval for: '{query}'")
         ctx.log(f"📊 Query complexity: {complexity.level} (max_steps={complexity.max_steps})")
+        ctx.emit_event(
+            kind="orchestration_started",
+            step="controller",
+            status="ok",
+            message="retrieval cycle started",
+            payload={"query": query, "complexity": complexity.level},
+        )
         
         # Processing loop
         while not ctx.is_complete():
@@ -38,7 +58,8 @@ class OrchestrationModule:
                 break
                 
             ctx.log(f"▶ Executing step: {step}")
-            
+            ctx.emit_event("step_started", step=step, status="info", message="dispatch")
+
             # Dispatch to appropriate handler
             try:
                 if step == "extract":
@@ -69,10 +90,35 @@ class OrchestrationModule:
                         "coverage_ratio": float(ctx.signals.get("coverage_ratio", 0.0)),
                     },
                 )
+                ctx.emit_event(
+                    "step_finished",
+                    step=step,
+                    status="ok",
+                    payload={
+                        "signals": {
+                            "ambiguity_score": float(ctx.signals.get("ambiguity_score", 0.0)),
+                            "highest_source_score": float(ctx.signals.get("highest_source_score", 0.0)),
+                            "coverage_ratio": float(ctx.signals.get("coverage_ratio", 0.0)),
+                        }
+                    },
+                )
+                ctx.update_ofr_residue(step=step, status="ok")
             except Exception as exc:
                 ctx.add_residue(step, "error", str(exc))
+                ctx.emit_event("step_finished", step=step, status="error", message=str(exc))
+                ctx.update_ofr_residue(step=step, status="error")
                 raise
                 
+            # Context gap hook: escalate to retrieval tool-paths when local results are weak.
+            gap_route = detect_gap_routing(ctx, step)
+            if gap_route and gap_route.mode == "retrieval_tools":
+                ctx.apply_routing(gap_route, step=f"router_gap:{step}")
+                if "expand" not in ctx.current_plan:
+                    ctx.add_step("expand", priority="normal")
+                if "targeted_search" not in ctx.current_plan:
+                    ctx.add_step("targeted_search", priority="normal")
+                ctx.update_ofr_residue(step=f"router_gap:{step}", status="ok")
+
             # Apply gear-shifting logic after each step
             self._apply_gear_shift(ctx)
             
@@ -100,11 +146,17 @@ class OrchestrationModule:
         
         # Log final state
         ctx.log(f"✓ Orchestration complete. Retrieved {len(ctx.retrieved_data)} results")
+
+        # Expose compact observability surfaces for callers/UI diagnostics.
+        self.last_orchestration_status = ctx.orchestration_status_report()
+        self.last_orchestration_snapshot = ctx.residue_snapshot(limit=20)
+
         if config.DEBUG:
             debug_print("=== ORCHESTRATION LOG ===")
             for log in ctx.logs:
                 debug_print(log)
             debug_print(f"Final signals: {ctx.signals}")
+            debug_print(f"Orchestration status: {self.last_orchestration_status}")
         
         return ctx.retrieved_data[:top_k]
     
@@ -174,15 +226,23 @@ class OrchestrationModule:
                 # Inject search for resolved entity
                 old_flag = config.USE_ORCHESTRATION
                 config.USE_ORCHESTRATION = False
-                
-                for term in search_terms[:2]:  # Try top 2 variations
-                    results = self.retrieve(term, top_k=3)
-                    if results:
-                        ctx.retrieved_data.extend(results)
-                        ctx.log(f"  Retrieved {len(results)} articles for '{term}'")
-                        break
-                
-                config.USE_ORCHESTRATION = old_flag
+                try:
+                    for term in search_terms[:2]:  # Try top 2 variations
+                        results = self.retrieve(term, top_k=3)
+                        ctx.record_excursion(
+                            step="resolve",
+                            mode="retrieval_tool",
+                            query=term,
+                            status="ok",
+                            note="multi-hop follow-up query",
+                            payload={"result_count": len(results), "resolved_entity": resolved_entity},
+                        )
+                        if results:
+                            ctx.retrieved_data.extend(results)
+                            ctx.log(f"  Retrieved {len(results)} articles for '{term}'")
+                            break
+                finally:
+                    config.USE_ORCHESTRATION = old_flag
             else:
                 ctx.log("  No indirect references detected")
                 
@@ -195,11 +255,19 @@ class OrchestrationModule:
             # Use existing retrieve() but with orchestration disabled to avoid recursion
             old_flag = config.USE_ORCHESTRATION
             config.USE_ORCHESTRATION = False
-            
-            results = self.retrieve(ctx.original_query, top_k=10)
-            
-            config.USE_ORCHESTRATION = old_flag
-            
+            try:
+                results = self.retrieve(ctx.original_query, top_k=10)
+            finally:
+                config.USE_ORCHESTRATION = old_flag
+            ctx.record_excursion(
+                step="search",
+                mode="local_retrieval",
+                query=ctx.original_query,
+                status="ok",
+                note="primary retrieval pass",
+                payload={"result_count": len(results)},
+            )
+
             # Merge new results with existing (avoid duplicates)
             existing_titles = {r.get('metadata', {}).get('title') for r in ctx.retrieved_data}
             for result in results:
@@ -313,12 +381,20 @@ class OrchestrationModule:
                 # Search for each expansion
                 old_flag = config.USE_ORCHESTRATION
                 config.USE_ORCHESTRATION = False
-                
-                for term in expansions[:3]:  # Limit to 3 expansions
-                    results = self.retrieve(term, top_k=3)
-                    ctx.retrieved_data.extend(results)
-                    
-                config.USE_ORCHESTRATION = old_flag
+                try:
+                    for term in expansions[:3]:  # Limit to 3 expansions
+                        results = self.retrieve(term, top_k=3)
+                        ctx.retrieved_data.extend(results)
+                        ctx.record_excursion(
+                            step="expand",
+                            mode="retrieval_tool",
+                            query=term,
+                            status="ok",
+                            note="query expansion attempt",
+                            payload={"result_count": len(results)},
+                        )
+                finally:
+                    config.USE_ORCHESTRATION = old_flag
                 ctx.log(f"  Expanded search with {len(expansions[:3])} alternative queries")
             else:
                 ctx.log("  No expansions generated")
@@ -338,15 +414,23 @@ class OrchestrationModule:
         try:
             old_flag = config.USE_ORCHESTRATION
             config.USE_ORCHESTRATION = False
-            
-            # Use suggested searches if available, otherwise use entity names
-            search_terms = suggested[:5] if suggested else missing[:3]
-            
-            for term in search_terms:
-                results = self.retrieve(term, top_k=2)
-                ctx.retrieved_data.extend(results)
+            try:
+                # Use suggested searches if available, otherwise use entity names
+                search_terms = suggested[:5] if suggested else missing[:3]
                 
-            config.USE_ORCHESTRATION = old_flag
+                for term in search_terms:
+                    results = self.retrieve(term, top_k=2)
+                    ctx.retrieved_data.extend(results)
+                    ctx.record_excursion(
+                        step="targeted_search",
+                        mode="retrieval_tool",
+                        query=term,
+                        status="ok",
+                        note="coverage gap targeted lookup",
+                        payload={"result_count": len(results), "missing_count": len(missing)},
+                    )
+            finally:
+                config.USE_ORCHESTRATION = old_flag
             ctx.log(f"  Targeted search for {len(search_terms)} missing entities")
             
         except Exception as e:
