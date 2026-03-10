@@ -173,31 +173,34 @@ DESKTOP_PATTERNS = [
 
 def classify_shell_intent(user_input: str) -> ShellIntent:
     """Classify the type of shell intent from user input.
-    
+
     Returns the most specific intent type detected.
     """
     text = (user_input or "").strip()
     low = text.lower()
-    
+
     if not text:
         return ShellIntent.UNKNOWN
-    
-    # Question guard: if the query is phrased as a question, it's almost certainly
-    # NOT a shell command unless it contains explicit command keywords.
-    # This prevents "what OS am i running" from being classified as shell_command.
+
+    # Question guard: most question-form queries are explanatory/factual, not
+    # execution requests. Only allow through if the wording clearly asks Hermit
+    # to execute something in a terminal.
     question_starts = (
         "what ", "who ", "why ", "how ", "when ", "where ",
         "is ", "are ", "can ", "does ", "could ", "would ",
         "should ", "do ", "did ", "has ", "have ", "will ",
         "what's ", "who's ", "how's ", "where's ", "when's ",
     )
-    explicit_command_keywords = (
-        "run ", "execute ", "launch ", "start ",
-        "list files", "list directory", "list dir", "list the contents",
-        "show me the files", "show me the contents", "show me the directory",
-    )
+    explicit_execution_patterns = [
+        r'^can\s+you\s+(run|execute|launch|start)\b',
+        r'\b(run|execute|launch|start)\s+(the\s+|a\s+)?(command|script|program)\b',
+        r'\bwhat\'?s\s+(the\s+)?(output|result)\s+of\b',
+        r'\b(show|list)\s+me\s+(the\s+)?(files|contents|directory)\b',
+        r'\b(list\s+(files|directory|dir|the\s+contents))\b',
+        r'`[^`]+`',
+    ]
     if low.startswith(question_starts):
-        if not any(kw in low for kw in explicit_command_keywords):
+        if not any(re.search(pattern, low, flags=re.IGNORECASE) for pattern in explicit_execution_patterns):
             return ShellIntent.UNKNOWN
     
     # Check for file write patterns

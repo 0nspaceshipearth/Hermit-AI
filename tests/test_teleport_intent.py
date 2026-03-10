@@ -40,6 +40,22 @@ class TestTeleportIntentRouting(unittest.TestCase):
         self.assertEqual(intent.shell_intent, "shell_command")
         self.assertEqual(intent.teleport_envelope.intent, "shell_command")
 
+    def test_classic_mode_keeps_explanatory_run_questions_factual(self):
+        config.RUNTIME_MODE = "classic"
+
+        intent = detect_intent("can you explain how to run a python script")
+
+        self.assertEqual(intent.mode_name, "FACTUAL")
+        self.assertIsNone(intent.shell_intent)
+
+    def test_classic_mode_still_blocks_explicit_execution_questions(self):
+        config.RUNTIME_MODE = "classic"
+
+        intent = detect_intent("can you run the command pwd")
+
+        self.assertEqual(intent.mode_name, "SHELL_BLOCKED")
+        self.assertEqual(intent.shell_intent, "wave_mode_required")
+
     def test_detect_command_strips_filler_words(self):
         self.assertEqual(detect_command("run the command pwd"), "pwd")
         self.assertEqual(detect_command("execute the script test.py"), "test.py")
