@@ -20,42 +20,211 @@
 import sys
 import os
 import cmd
+import shlex
+import subprocess
+from pathlib import Path
 from typing import List, Optional
 import libzim
 
 from chatbot.rag import RAGSystem, TextProcessor
 from chatbot import config
-from chatbot.chat import build_messages, stream_chat, clear_runtime_memory
+from chatbot.chat import build_messages, stream_chat, clear_runtime_memory, load_runtime_checkpoint
 from chatbot.model_manager import ModelManager
 from chatbot.models import Message
 
+
 class ChatbotCLI(cmd.Cmd):
     """Command-line interface for Hermit."""
-    
+
     intro = 'Welcome to Hermit CLI. Type help or ? to list commands.\n'
     prompt = '(hermit) '
-    
+
     def __init__(self, model_name: str):
         super().__init__()
         self.model_name = model_name
         self.rag = None
         self.last_results = []
-        
+        self.workspace_root = Path(getattr(config, 'CLI_WORKSPACE_ROOT', '.')).resolve()
+        self.cwd = self.workspace_root
+
         print(f"Initializing RAG System (Model: {model_name})...")
         try:
             self.rag = RAGSystem()
-            # self.rag.load_resources() # Handled in __init__
-            
+
             # Inject our RAG instance into the chat module so it doesn't try to reload it
             import chatbot.chat
             chatbot.chat._rag_system = self.rag
-            
+
             print("RAG System Ready.")
         except Exception as e:
             print(f"Error initializing RAG: {e}")
             print("Some functionality may be limited.")
-            
+
         self.history = []
+        self._refresh_prompt()
+
+    def _refresh_prompt(self) -> None:
+        rel = os.path.relpath(self.cwd, self.workspace_root)
+        label = "." if rel == "." else rel
+        self.prompt = f'(hermit:{label}) '
+
+    def _resolve_workspace_path(self, raw: str = "") -> Path:
+        candidate = (raw or ".").strip()
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = self.cwd / path
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.workspace_root)
+        except ValueError:
+            raise ValueError(f"Path escapes workspace root: {resolved}")
+        return resolved
+
+    def _format_path(self, path: Path) -> str:
+        rel = os.path.relpath(path, self.workspace_root)
+        return "." if rel == "." else rel
+
+    def _print_excursion(self, title: str, body: str) -> None:
+        print(f"\n=== {title} ===")
+        print(body.rstrip())
+        print("=" * (len(title) + 8))
+
+    def do_pwd(self, arg):
+        """Show the current chamber workspace path."""
+        print(self._format_path(self.cwd))
+
+    def do_cd(self, arg):
+        """Change chamber workspace: cd <path>"""
+        try:
+            target = self._resolve_workspace_path(arg or ".")
+            if not target.exists():
+                print(f"Directory not found: {target}")
+                return
+            if not target.is_dir():
+                print(f"Not a directory: {target}")
+                return
+            self.cwd = target
+            self._refresh_prompt()
+            print(f"Entered chamber: {self._format_path(self.cwd)}")
+        except Exception as e:
+            print(f"cd failed: {e}")
+
+    def do_ls(self, arg):
+        """List files in the current or specified chamber path: ls [path]"""
+        try:
+            target = self._resolve_workspace_path(arg or ".")
+            if not target.exists():
+                print(f"Path not found: {target}")
+                return
+            if target.is_file():
+                print(self._format_path(target))
+                return
+
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            if not entries:
+                print("(empty)")
+                return
+            for entry in entries:
+                suffix = "/" if entry.is_dir() else ""
+                print(f"{entry.name}{suffix}")
+        except Exception as e:
+            print(f"ls failed: {e}")
+
+    def do_cat(self, arg):
+        """Read a local file inside the workspace: cat <path>"""
+        if not arg:
+            print("Usage: cat <path>")
+            return
+        try:
+            target = self._resolve_workspace_path(arg)
+            if not target.exists() or not target.is_file():
+                print(f"File not found: {target}")
+                return
+            data = target.read_text(encoding='utf-8', errors='replace')
+            limit = int(getattr(config, 'CLI_MAX_FILE_READ_CHARS', 12000) or 12000)
+            if len(data) > limit:
+                data = data[:limit] + "\n...[truncated]"
+            self._print_excursion(f"FILE {self._format_path(target)}", data)
+        except Exception as e:
+            print(f"cat failed: {e}")
+
+    def do_write(self, arg):
+        """Write a local file in one shot: write <path> ::: <content>"""
+        if not getattr(config, 'CLI_WRITE_ENABLED', True):
+            print("File writes are disabled in this build.")
+            return
+        if ":::" not in arg:
+            print("Usage: write <path> ::: <content>")
+            return
+        raw_path, content = arg.split(":::", 1)
+        try:
+            target = self._resolve_workspace_path(raw_path.strip())
+            text = content.lstrip()
+            limit = int(getattr(config, 'CLI_MAX_FILE_WRITE_CHARS', 20000) or 20000)
+            if len(text) > limit:
+                print(f"Refusing write larger than {limit} chars")
+                return
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding='utf-8')
+            print(f"Wrote {len(text)} chars to {self._format_path(target)}")
+        except Exception as e:
+            print(f"write failed: {e}")
+
+    def do_shell(self, arg):
+        """Run a bounded shell excursion in the current chamber: shell <command>"""
+        if not getattr(config, 'CLI_SHELL_ENABLED', True):
+            print("Shell excursions are disabled in this build.")
+            return
+        command = (arg or "").strip()
+        if not command:
+            print("Usage: shell <command>")
+            return
+        try:
+            timeout = int(getattr(config, 'CLI_SHELL_TIMEOUT', 20) or 20)
+            result = subprocess.run(
+                command,
+                cwd=str(self.cwd),
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            body = ""
+            if result.stdout:
+                body += result.stdout.rstrip() + "\n"
+            if result.stderr:
+                body += "\n[stderr]\n" + result.stderr.rstrip() + "\n"
+            body += f"\n(exit={result.returncode})"
+            self._print_excursion(f"SHELL {command}", body or f"(exit={result.returncode})")
+        except subprocess.TimeoutExpired:
+            print("shell failed: timed out")
+        except Exception as e:
+            print(f"shell failed: {e}")
+
+    def do_chamber(self, arg):
+        """Show chamber state, available excursions, and current residue."""
+        checkpoint = load_runtime_checkpoint()
+        print("\nHermit Chamber")
+        print("==============")
+        print(f"Workspace root: {self.workspace_root}")
+        print(f"Current chamber: {self.cwd}")
+        print(f"Runtime mode: {getattr(config, 'RUNTIME_MODE', 'classic')}")
+        print("Excursions: ls, cd, pwd, cat, write, shell, checkpoint")
+        if checkpoint.get('objective') or checkpoint.get('artifacts'):
+            print("\nResidue snapshot:")
+            print(f"- Objective: {checkpoint.get('objective', '')}")
+            print(f"- Frontier: {', '.join(checkpoint.get('frontier', [])[:4]) or '(none)'}")
+            print(f"- Risk: {checkpoint.get('risk', 'unknown')}")
+            print(f"- Next step: {checkpoint.get('next_step', '')}")
+            artifacts = checkpoint.get('artifacts', []) or []
+            if artifacts:
+                print(f"- Artifacts: {len(artifacts)}")
+        print("")
+
+    def do_checkpoint(self, arg):
+        """Print the current contracted-cognition checkpoint."""
+        checkpoint = load_runtime_checkpoint()
+        self._print_excursion("RUNTIME CHECKPOINT", str(checkpoint))
 
     def do_clear(self, arg):
         """Clear in-session conversation memory."""
@@ -119,6 +288,7 @@ class ChatbotCLI(cmd.Cmd):
         print(backend_detail)
         print(f"Runtime mode: {getattr(config, 'RUNTIME_MODE', 'classic')}")
         print(f"Model: {self.model_name}")
+        print(f"Workspace: {self._format_path(self.cwd)}")
 
         if not self.rag:
             print("\nRAG: Inactive")
@@ -154,20 +324,20 @@ class ChatbotCLI(cmd.Cmd):
         if not arg:
             print("Usage: search <query>")
             return
-            
+
         print(f"Searching for '{arg}'...")
         if not self.rag:
             print("RAG system not available.")
             return
-            
+
         try:
             results = self.rag.retrieve(arg, top_k=10)
             self.last_results = results
-            
+
             if not results:
                 print("No results found.")
                 return
-                
+
             print(f"\nFound {len(results)} results:")
             for i, res in enumerate(results, 1):
                 meta = res.get('metadata', {})
@@ -176,7 +346,7 @@ class ChatbotCLI(cmd.Cmd):
                 score = res.get('score', 0.0)
                 print(f"{i}. {title} (Score: {score:.2f}) [Path: {path}]")
             print("\nType 'read <number>' or 'read <path>' to view an article.")
-            
+
         except Exception as e:
             print(f"Search failed: {e}")
 
@@ -185,40 +355,35 @@ class ChatbotCLI(cmd.Cmd):
         if not arg:
             print("Usage: read <result_number> or read <path>")
             return
-            
+
         path_to_read = None
-        
-        # Try to parse as index
+
         if arg.isdigit() and self.last_results:
             idx = int(arg) - 1
             if 0 <= idx < len(self.last_results):
                 path_to_read = self.last_results[idx]['metadata'].get('path')
                 print(f"Selected result #{arg}: {path_to_read}")
             else:
-                 print(f"Invalid index. Valid range: 1-{len(self.last_results)}")
-                 return
+                print(f"Invalid index. Valid range: 1-{len(self.last_results)}")
+                return
         else:
-            # Treat as path
             path_to_read = arg
-            
+
         if not path_to_read:
             print("No path resolved.")
             return
-            
-            
-        # Get context if available
+
         terms = []
         if self.last_results and arg.isdigit():
-             idx = int(arg) - 1
-             if 0 <= idx < len(self.last_results):
-                 ctx = self.last_results[idx].get('search_context', {})
-                 terms = ctx.get('entities', [])
+            idx = int(arg) - 1
+            if 0 <= idx < len(self.last_results):
+                ctx = self.last_results[idx].get('search_context', {})
+                terms = ctx.get('entities', [])
 
         self._open_zim_entry(path_to_read, highlight_terms=terms)
 
     def _open_zim_entry(self, path, highlight_terms=None):
         """Open ZIM entry with smart fallback logic."""
-        # Find ZIM file
         zim_files = [f for f in os.listdir('.') if f.endswith('.zim')]
         if not zim_files:
             print("Error: No ZIM files found in current directory.")
@@ -232,73 +397,74 @@ class ChatbotCLI(cmd.Cmd):
             return
 
         entry = None
-        
-        # Helper
+
         def try_find(p):
             try:
                 return zim.get_entry_by_path(p)
-            except:
+            except Exception:
                 return None
 
-        # Strategy 1: Direct
         entry = try_find(path)
-        
-        # Strategy 2: Title
+
         if not entry:
             try:
                 entry = zim.get_entry_by_title(path)
-            except:
+            except Exception:
                 pass
-                
-        # Strategy 3: Smart Fallback (Variations)
+
         if not entry:
             variations = []
-            if ' ' in path: variations.append(path.replace(' ', '_'))
-            if '_' in path: variations.append(path.replace('_', ' '))
+            if ' ' in path:
+                variations.append(path.replace(' ', '_'))
+            if '_' in path:
+                variations.append(path.replace('_', ' '))
             variations.append(path.title())
-            if ' ' in path: variations.append(path.title().replace(' ', '_')) # Title_Case
-            
+            if ' ' in path:
+                variations.append(path.title().replace(' ', '_'))
+
             paths_to_try = [path] + variations
             for candidate in paths_to_try:
                 attempts = [candidate]
-                if not candidate.startswith('/'): attempts.append('/' + candidate)
-                if candidate.startswith('/'): attempts.append(candidate[1:])
-                
+                if not candidate.startswith('/'):
+                    attempts.append('/' + candidate)
+                if candidate.startswith('/'):
+                    attempts.append(candidate[1:])
+
                 for attempt in attempts:
-                    if config.DEBUG: print(f"[DEBUG] Trying: {attempt}")
+                    if config.DEBUG:
+                        print(f"[DEBUG] Trying: {attempt}")
                     entry = try_find(attempt)
-                    if entry: break
-                if entry: break
-        
+                    if entry:
+                        break
+                if entry:
+                    break
+
         if not entry or entry.is_redirect:
             print(f"Article not found: '{path}'")
             return
-            
+
         item = entry.get_item()
         if item.mimetype != 'text/html':
             print(f"Cannot render non-text content ({item.mimetype})")
             return
-            
+
         print(f"\n=== {entry.title} ===\n")
         try:
-            # Use the robust renderable extraction
             content = TextProcessor.extract_renderable_text(item.content)
-            
-            # Apply ANSI Highlighting
+
             if highlight_terms:
                 import re
-                # ANSI Yellow + Bold
-                START_HL = "\033[1;33m"
-                END_HL = "\033[0m"
-                
+                start_hl = "\033[1;33m"
+                end_hl = "\033[0m"
+
                 for term in highlight_terms:
-                    if not term or len(term) < 3: continue
-                    # Case-insensitive replacement
+                    if not term or len(term) < 3:
+                        continue
                     pattern = re.compile(re.escape(term), re.IGNORECASE)
-                    content = pattern.sub(lambda m: f"{START_HL}{m.group()}{END_HL}", content)
-            
+                    content = pattern.sub(lambda m: f"{start_hl}{m.group()}{end_hl}", content)
+
             print(content)
-            print("\n" + "="*40 + "\n")
+            print("\n" + "=" * 40 + "\n")
         except Exception as e:
             print(f"Error rendering content: {e}")
 
@@ -308,49 +474,46 @@ class ChatbotCLI(cmd.Cmd):
         clear_runtime_memory(reset_rag=True)
         print("Goodbye!")
         return True
-        
+
     def do_exit(self, arg):
         """Exit the CLI."""
         return self.do_quit(arg)
-    
+
     def default(self, line):
         """Handle chat interactions."""
-        # Treat as chat
-        if not line: return
-        
-        # Check for empty lines or comments
-        if line.strip().startswith('#'): return
+        if not line:
+            return
 
-        # Append to history FIRST (Critical for model to see the question)
+        if line.strip().startswith('#'):
+            return
+
         self.history.append(Message(role="user", content=line))
 
         print(f"\nThinking...")
         try:
-            # Build messages
             messages = build_messages(config.SYSTEM_PROMPT, self.history)
-            
-            # Stream response
+
             print(f"Hermit: ", end="", flush=True)
             full_response = ""
             for chunk in stream_chat(self.model_name, messages):
                 print(chunk, end="", flush=True)
                 full_response += chunk
             print("\n")
-            
-            # Update history with assistant response
+
             self.history.append(Message(role="assistant", content=full_response))
-            
+
         except KeyboardInterrupt:
             print("\n[Interrupted]")
         except Exception as e:
             print(f"\nError: {e}")
-        
+
     def do_EOF(self, arg):
         """Exit on Ctrl-D"""
         self.history.clear()
         clear_runtime_memory(reset_rag=True)
         print("")
         return True
+
 
 if __name__ == '__main__':
     cli = ChatbotCLI(config.DEFAULT_MODEL)

@@ -21,7 +21,8 @@
 import sys
 import json
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+import os
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from chatbot.models import Message
 from chatbot import config
 from chatbot.model_manager import ModelManager
@@ -35,6 +36,259 @@ def debug_print(msg: str):
 
 # Global status callback for UI updates
 _status_callback = None
+_runtime_checkpoint: Optional[Dict[str, Any]] = None
+_rag_system = None
+
+
+def _project_root() -> str:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(current_dir)
+
+
+def _runtime_checkpoint_path() -> str:
+    data_dir = os.path.join(_project_root(), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "runtime_checkpoint.json")
+
+
+def _default_runtime_checkpoint() -> Dict[str, Any]:
+    return {
+        "contract_version": "contracted_cognition.v1",
+        "objective": "",
+        "frontier": [],
+        "artifacts": [],
+        "constraints": [],
+        "open_loops": [],
+        "risk": "unknown",
+        "next_step": "",
+        "drop_list": [],
+        "query": "",
+        "updated_at": 0,
+        "source": {},
+    }
+
+
+def load_runtime_checkpoint() -> Dict[str, Any]:
+    global _runtime_checkpoint
+    if _runtime_checkpoint is not None:
+        return dict(_runtime_checkpoint)
+
+    path = _runtime_checkpoint_path()
+    if not os.path.exists(path):
+        _runtime_checkpoint = _default_runtime_checkpoint()
+        return dict(_runtime_checkpoint)
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict):
+            merged = _default_runtime_checkpoint()
+            merged.update(payload)
+            _runtime_checkpoint = merged
+            return dict(_runtime_checkpoint)
+    except Exception:
+        pass
+
+    _runtime_checkpoint = _default_runtime_checkpoint()
+    return dict(_runtime_checkpoint)
+
+
+def save_runtime_checkpoint(payload: Dict[str, Any]) -> None:
+    global _runtime_checkpoint
+    merged = _default_runtime_checkpoint()
+    merged.update(payload or {})
+    merged["updated_at"] = int(time.time())
+
+    path = _runtime_checkpoint_path()
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(merged, handle, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
+    _runtime_checkpoint = merged
+
+
+def clear_runtime_checkpoint() -> None:
+    global _runtime_checkpoint
+    _runtime_checkpoint = _default_runtime_checkpoint()
+    path = _runtime_checkpoint_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
+def _trim_text(value: str, limit: int = 280) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _dedupe_preserve_order(items: List[str], limit: int) -> List[str]:
+    seen = set()
+    output: List[str] = []
+    for item in items:
+        text = _trim_text(str(item), 180)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(text)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _artifact_summary(snapshot: Dict[str, Any], results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    artifacts: List[Dict[str, Any]] = []
+
+    for artifact in snapshot.get("artifacts", [])[-4:]:
+        if not isinstance(artifact, dict):
+            continue
+        entry = {
+            "type": artifact.get("mode", "artifact"),
+            "step": artifact.get("step", ""),
+            "query": _trim_text(str(artifact.get("query", "")), 120),
+            "status": artifact.get("status", "ok"),
+            "note": _trim_text(str(artifact.get("note", "")), 140),
+        }
+        artifacts.append(entry)
+
+    if not artifacts:
+        for result in results[:3]:
+            meta = result.get("metadata", {}) if isinstance(result, dict) else {}
+            title = _trim_text(str(meta.get("title", "")), 120)
+            if title:
+                artifacts.append({
+                    "type": "source",
+                    "step": "search",
+                    "query": title,
+                    "status": "ok",
+                    "note": "retrieved reference",
+                })
+
+    return artifacts[:4]
+
+
+def capture_runtime_checkpoint(
+    query_text: str,
+    history: List[Message],
+    results: List[Dict[str, Any]],
+    rag_snapshot: Optional[Dict[str, Any]] = None,
+    rag_status: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    snapshot = rag_snapshot or {}
+    status = rag_status or {}
+    previous = load_runtime_checkpoint()
+
+    objective = (
+        snapshot.get("active_goal")
+        or status.get("active_goal")
+        or previous.get("objective")
+        or "answer_user_query"
+    )
+
+    base_mind = snapshot.get("base_mind", {}) if isinstance(snapshot.get("base_mind"), dict) else {}
+    frontier = base_mind.get("frontier") or snapshot.get("objective_frontier_risk", {}).get("frontier") or []
+    if not frontier and results:
+        frontier = ["synthesize_answer"]
+
+    open_loops = list(previous.get("open_loops", []))
+    if not results:
+        open_loops.insert(0, "No strong retrieval hits; answer may rely on general knowledge.")
+    if status.get("contract_ok") is False:
+        open_loops.insert(0, f"Observability contract issues: {', '.join(status.get('contract_issues', []))}")
+
+    constraints = [
+        "Prefer verified source facts when present.",
+        "Preserve only compact residue across resets.",
+    ]
+    if results:
+        constraints.append("Do not drop retrieved artifacts that support the current answer.")
+
+    recent_user = [msg.content for msg in history if msg.role == "user"][-2:]
+    recent_assistant = [msg.content for msg in history if msg.role == "assistant"][-1:]
+    if recent_assistant:
+        open_loops.append(f"Last assistant output: {_trim_text(recent_assistant[-1], 180)}")
+
+    next_step = "synthesize_answer"
+    if not results:
+        next_step = "answer_with_care"
+    elif frontier:
+        next_step = str(frontier[0])
+
+    payload = {
+        "contract_version": "contracted_cognition.v1",
+        "objective": str(objective),
+        "frontier": _dedupe_preserve_order([str(item) for item in frontier], 4),
+        "artifacts": _artifact_summary(snapshot, results),
+        "constraints": _dedupe_preserve_order(constraints, 5),
+        "open_loops": _dedupe_preserve_order(open_loops + recent_user, 5),
+        "risk": str(status.get("ofr_risk") or base_mind.get("risk") or previous.get("risk") or "unknown"),
+        "next_step": next_step,
+        "drop_list": [
+            "Discard transient chain-of-thought and stale scratch state.",
+            "Keep only compact residue plus typed artifacts.",
+        ],
+        "query": _trim_text(query_text, 220),
+        "source": {
+            "routing_mode": status.get("mode") or snapshot.get("routing_mode") or "local_only",
+            "routing_reason": status.get("routing_reason") or snapshot.get("routing_reason") or "",
+            "result_count": len(results),
+        },
+    }
+    save_runtime_checkpoint(payload)
+    return payload
+
+
+def _format_runtime_checkpoint_for_prompt(checkpoint: Dict[str, Any]) -> str:
+    if not checkpoint:
+        return ""
+    if not checkpoint.get("objective") and not checkpoint.get("artifacts"):
+        return ""
+
+    lines = [
+        "\n\n=== CONTRACTED COGNITION HANDOFF ===",
+        f"Contract: {checkpoint.get('contract_version', 'contracted_cognition.v1')}",
+        f"Objective: {checkpoint.get('objective', '')}",
+        f"Risk: {checkpoint.get('risk', 'unknown')}",
+        f"Next Step: {checkpoint.get('next_step', '')}",
+    ]
+
+    frontier = checkpoint.get("frontier", []) or []
+    if frontier:
+        lines.append("Frontier:")
+        for item in frontier[:4]:
+            lines.append(f"- {item}")
+
+    artifacts = checkpoint.get("artifacts", []) or []
+    if artifacts:
+        lines.append("Artifacts:")
+        for item in artifacts[:4]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("query") or item.get("note") or item.get("step") or "artifact"
+            note = item.get("note", "")
+            lines.append(f"- {item.get('type', 'artifact')}::{label} [{item.get('status', 'ok')}] {note}".strip())
+
+    open_loops = checkpoint.get("open_loops", []) or []
+    if open_loops:
+        lines.append("Open Loops:")
+        for item in open_loops[:4]:
+            lines.append(f"- {item}")
+
+    constraints = checkpoint.get("constraints", []) or []
+    if constraints:
+        lines.append("Persistence Rules:")
+        for item in constraints[:4]:
+            lines.append(f"- {item}")
+
+    lines.append("Use this handoff to reconstruct task-relevant state after resets. Preserve residue and typed artifacts; discard transient scratch reasoning.")
+    lines.append("====================================")
+    return "\n".join(lines)
 
 
 def set_status_callback(callback):
@@ -53,13 +307,16 @@ def _update_status(status: str):
             pass
 
 
-def clear_runtime_memory(reset_rag: bool = False) -> None:
-    """Clear in-process session caches (no disk persistence)."""
+def clear_runtime_memory(reset_rag: bool = False, preserve_checkpoint: bool = True) -> None:
+    """Clear in-process session caches while optionally preserving contracted residue."""
     try:
         from chatbot.rag.search import clear_title_cache
         clear_title_cache()
     except Exception:
         pass
+
+    if not preserve_checkpoint:
+        clear_runtime_checkpoint()
 
     if reset_rag:
         global _rag_system
@@ -257,67 +514,55 @@ def stream_chat(model: str, messages: List[dict]) -> Iterable[str]:
 
                 while True:
                     if in_thought_block:
-                        end_tag = "</thought>"
-                        if end_tag in buffer:
-                            _, after = buffer.split(end_tag, 1)
-                            buffer = after
-                            in_thought_block = False
-                        else:
+                        end_idx = buffer.find('</think>')
+                        if end_idx == -1:
+                            buffer = ""
                             break
-                    else:
-                        start_tag = "<thought>"
-                        if start_tag in buffer:
-                            before, after = buffer.split(start_tag, 1)
-                            if before:
-                                yielded_chars += len(before)
-                                yield before
-                            buffer = after
-                            in_thought_block = True
-                        else:
-                            if "<" in buffer:
-                                safe_len = buffer.find("<")
-                                if safe_len > 0:
-                                    chunk_out = buffer[:safe_len]
-                                    yielded_chars += len(chunk_out)
-                                    yield chunk_out
-                                    buffer = buffer[safe_len:]
-                                break
-                            else:
-                                if buffer:
-                                    yielded_chars += len(buffer)
-                                    yield buffer
-                                    buffer = ""
-                                break
+                        buffer = buffer[end_idx + len('</think>'):]
+                        in_thought_block = False
+                        continue
+
+                    start_idx = buffer.find('<think>')
+                    if start_idx == -1:
+                        if buffer:
+                            yielded_chars += len(buffer)
+                            yield buffer
+                            buffer = ""
+                        break
+
+                    visible = buffer[:start_idx]
+                    if visible:
+                        yielded_chars += len(visible)
+                        yield visible
+                    buffer = buffer[start_idx + len('<think>'):]
+                    in_thought_block = True
 
         if buffer and not in_thought_block:
             yielded_chars += len(buffer)
             yield buffer
 
         duration = time.time() - started_at
+        first_token_seconds = (first_token_at - started_at) if first_token_at is not None else None
         record_generation_metrics(
             model=model,
             lane=str(profile["lane"]),
-            prompt_chars=sum(len(str(m.get("content", ""))) for m in prepared_messages),
+            prompt_chars=int(profile.get("prompt_chars", 0)),
             output_chars=yielded_chars,
             duration_seconds=duration,
-            first_token_seconds=(first_token_at - started_at) if first_token_at else None,
+            first_token_seconds=first_token_seconds,
             metadata={
-                "n_ctx": n_ctx,
-                "max_tokens": max_tokens,
                 "answer_type": profile.get("answer_type"),
                 "fact_count": profile.get("fact_count"),
             },
         )
-        debug_print("Stream complete.")
-
     except Exception as e:
-        debug_print(f"Local inference error: {e}")
-        raise RuntimeError(f"Local model generation failed: {e}")
+        debug_print(f"stream_chat error: {type(e).__name__}: {e}")
+        raise
 
 
-def full_chat(model: str, messages: List[dict]) -> str:
-    """Full chat with local model."""
-    debug_print(f"full_chat called with model='{model}'")
+def chat(model: str, messages: List[dict]) -> str:
+    """Non-streaming chat with local model."""
+    debug_print(f"chat called with model='{model}'")
 
     try:
         profile = _choose_generation_lane(model, messages)
@@ -328,105 +573,59 @@ def full_chat(model: str, messages: List[dict]) -> str:
 
         _update_status(f"Generating response ({profile['lane']})...")
         started_at = time.time()
-        resp = llm.create_chat_completion(
+        response = llm.create_chat_completion(
             messages=prepared_messages,
-            stream=False,
             temperature=0.3,
             repeat_penalty=1.2,
             max_tokens=max_tokens,
         )
-        debug_print(f"RAW LLM RESP: {resp}")
-
-        content = resp['choices'][0]['message']['content']
+        output = response['choices'][0]['message']['content']
         duration = time.time() - started_at
         record_generation_metrics(
             model=model,
             lane=str(profile["lane"]),
-            prompt_chars=sum(len(str(m.get("content", ""))) for m in prepared_messages),
-            output_chars=len(content or ""),
+            prompt_chars=int(profile.get("prompt_chars", 0)),
+            output_chars=len(output),
             duration_seconds=duration,
             metadata={
-                "n_ctx": n_ctx,
-                "max_tokens": max_tokens,
                 "answer_type": profile.get("answer_type"),
                 "fact_count": profile.get("fact_count"),
             },
         )
-        return content
-
+        return output
     except Exception as e:
-        debug_print(f"Local inference error: {e}")
-        raise RuntimeError(f"Local model generation failed: {e}")
+        debug_print(f"chat error: {type(e).__name__}: {e}")
+        raise
 
 
-from chatbot.rag import RAGSystem
-
-# Global RAG instance
-_rag_system = None
+def full_chat(model: str, messages: List[dict]) -> str:
+    """Compatibility wrapper for legacy callers expecting full_chat."""
+    return chat(model, messages)
 
 
 def get_rag_system():
+    """Lazy-load and cache the RAG system."""
     global _rag_system
-    debug_print("get_rag_system called")
     if _rag_system is None:
-        debug_print("RAG system not initialized, checking for resources...")
-        import os
-        import glob
-
-        zim_files = glob.glob("*.zim")
-        zim_paths = [os.path.abspath(z) for z in zim_files]
-
-        has_index = os.path.exists("data/indices/content_index.faiss") or os.path.exists("data/indices/title_index.faiss")
-
-        if has_index or zim_paths:
-            try:
-                print(f"Initializing RAG system (Multi-ZIM Mode)...")
-                if zim_paths:
-                    print(f"Found {len(zim_paths)} ZIM file(s)")
-                else:
-                    print("Warning: No ZIM files found, relying on existing index only.")
-
-                _rag_system = RAGSystem(zim_paths=zim_paths)
-                debug_print("RAG system initialized successfully (multi-ZIM)")
-            except Exception as e:
-                print(f"Failed to load RAG: {e}")
-                debug_print(f"RAG initialization failed: {e}")
-                _rag_system = None
-        else:
-            debug_print("No RAG resources found (no index or ZIM files)")
-    else:
-        debug_print("RAG system already initialized")
+        from chatbot.rag import RAGSystem
+        _rag_system = RAGSystem()
     return _rag_system
 
 
 def retrieve_and_display_links(query: str) -> List[dict]:
-    """Retrieve and format links for link mode."""
-    debug_print("="*60)
+    """Retrieve links only for link-mode displays."""
     debug_print(f"retrieve_and_display_links called with query='{query}'")
 
-    rag = get_rag_system()
-    if not rag:
-        debug_print("No RAG system available")
-        return []
-
     try:
-        _update_status("Searching knowledge base...")
-        results = rag.retrieve(query, top_k=8)
-        debug_print(f"RAG retrieved {len(results)} results")
-
-        if not results:
-            _update_status("No results found")
-            return []
-
-        _update_status("Formatting results...")
-        links = []
+        rag = get_rag_system()
+        results = rag.retrieve(query, top_k=getattr(config, 'MAX_LINK_RESULTS', 10))
+        links: List[dict] = []
         seen_titles = set()
 
         for result in results:
             metadata = result.get('metadata', {})
-            title = metadata.get('title', 'Unknown Title')
-
-            if title in seen_titles:
+            title = metadata.get('title', '')
+            if not title or title in seen_titles:
                 continue
             seen_titles.add(title)
 
@@ -561,6 +760,14 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
     else:
         debug_print(f"Skipping RAG retrieval: rag={rag is not None}, query_text={bool(query_text)}, should_retrieve={intent.should_retrieve}")
 
+    checkpoint = capture_runtime_checkpoint(
+        query_text=query_text or "",
+        history=history,
+        results=results,
+        rag_snapshot=getattr(rag, 'last_orchestration_snapshot', {}) if rag else {},
+        rag_status=getattr(rag, 'last_orchestration_status', {}) if rag else {},
+    )
+
     debug_print("-" * 60)
     debug_print("MESSAGE CONSTRUCTION PHASE")
 
@@ -573,7 +780,8 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                    f"6. ANSWER THE QUESTION DIRECTLY: If asked 'where was X born?', answer with a LOCATION. If asked 'when?', answer with a DATE. Do not provide tangential information.\n" \
                    f"7. FOR COMPARISONS: You MUST discuss BOTH entities being compared, not just one.\n" \
                    f"8. BE HELPFUL: If the context is partial or the match is not perfect, try to infer the answer or use related information to help the user instead of simply refusing.\n" \
-                   f"9. NATURAL TONE: You are an expert. Do NOT mention 'RAG', 'context', 'retrieved documents', or 'knowledge base' in your final answer. Integrate the information naturally as if you already knew it."
+                   f"9. NATURAL TONE: You are an expert. Do NOT mention 'RAG', 'context', 'retrieved documents', or 'knowledge base' in your final answer. Integrate the information naturally as if you already knew it.\n" \
+                   f"10. CONTRACTED COGNITION: Use the handoff block to reconstruct task-relevant state after resets. Preserve typed artifacts and compact residue; discard transient scratch reasoning."
 
     if results:
         search_ctx = results[0].get('search_context', {})
@@ -582,9 +790,9 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
             debug_print(f"Injecting prompt reinforcement for answer_type: '{answer_type}'")
             instructions += f"\n8. **ANSWER THE SPECIFIC QUESTION**: The user specifically asked for **{answer_type}** information. You MUST include this specific detail (date, location, name, etc.) in your answer. Do not just summarize the entity's biography."
 
-    final_system_prompt = system_prompt + intent.system_instruction + instructions
+    final_system_prompt = system_prompt + _format_runtime_checkpoint_for_prompt(checkpoint) + intent.system_instruction + instructions
 
-    debug_print(f"Base system_prompt + intent instruction + instructions = {len(final_system_prompt)} chars")
+    debug_print(f"Base system_prompt + checkpoint + intent instruction + instructions = {len(final_system_prompt)} chars")
 
     if context_text:
         final_system_prompt += "\n\n" + context_text

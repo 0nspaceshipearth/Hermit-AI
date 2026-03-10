@@ -148,6 +148,15 @@ MAX_LINK_RESULTS = 10
 # Maximum characters of article text stored per search result.
 MAX_ARTICLE_TEXT_CHARS = 6000
 
+# === ADVANCED CLI / CHAMBER WORKSPACE ===
+# Root directory for local filesystem excursions from the Hermit CLI.
+CLI_WORKSPACE_ROOT = "."
+CLI_WRITE_ENABLED = True
+CLI_SHELL_ENABLED = True
+CLI_SHELL_TIMEOUT = 20
+CLI_MAX_FILE_READ_CHARS = 12000
+CLI_MAX_FILE_WRITE_CHARS = 20000
+
 SYSTEM_PROMPT = (
     "You are a helpful, thorough AI assistant. When provided with context, "
     "you carefully read ALL of it to find the most accurate and complete answer. "
