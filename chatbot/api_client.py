@@ -132,7 +132,7 @@ class OpenAIClientWrapper:
                 continue
             user_input.append({
                 "role": role,
-                "content": [{"type": "input_text", "text": str(content)}],
+                "content": str(content),
             })
 
         payload = {
