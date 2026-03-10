@@ -142,8 +142,7 @@ class OpenAIClientWrapper:
             "store": False,
             "stream": stream,
         }
-        if max_tokens:
-            payload["max_output_tokens"] = max_tokens
+        # Codex backend rejects max_output_tokens; let backend control token budget.
         return payload
 
     def _blocking_responses(self, messages, max_tokens=None, temperature=0.7, top_p=0.95):
