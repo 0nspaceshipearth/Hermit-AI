@@ -38,7 +38,7 @@ from chatbot.chat import (
 )
 from chatbot import config
 from chatbot.config import DEFAULT_MODEL
-from chatbot.model_manager import set_download_callback
+from chatbot.model_manager import set_download_callback, ModelManager
 from chatbot.preferences import load_theme_name, save_theme_name
 
 
@@ -2324,7 +2324,7 @@ class ChatbotGUI:
         suggestions: List[str] = []
         text_lower = text.lower()
         
-        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/forge"]
+        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/forge", "/mode"]
         
         if text.startswith("/"):
             for cmd in commands:
@@ -2813,6 +2813,20 @@ class ChatbotGUI:
             pass
         return None
     
+    def _set_runtime_mode(self, mode: str) -> bool:
+        mode_norm = (mode or "").strip().lower()
+        if mode_norm not in {"classic", "wave"}:
+            return False
+        previous = getattr(config, "RUNTIME_MODE", "classic")
+        config.RUNTIME_MODE = mode_norm
+        self.history.clear()
+        self.query_history.clear()
+        clear_runtime_memory(reset_rag=False)
+        ModelManager.close_all()
+        self.append_message("system", f"Mode set to {mode_norm} (was {previous}). Runtime memory reset.")
+        self.update_status(f"Mode: {mode_norm}")
+        return True
+
     def on_clear(self):
         """Clear chat history."""
         self.history.clear()
@@ -2853,6 +2867,7 @@ class ChatbotGUI:
   /status            Show system status
   /api               Configure external API mode
   /forge             Build a ZIM from local docs
+  /mode              Show or change runtime architecture
 
 Current Mode: Chat Mode
 
@@ -2860,6 +2875,11 @@ Mode Description:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 CHAT MODE (Default): Full AI responses using RAG with detailed explanations and synthesis.
+
+RUNTIME ARCHITECTURE:
+  /mode           Show current runtime mode
+  /mode classic   Stable tiered loading/unloading behavior
+  /mode wave      Keep model tiers hot and reset runtime state between passes
 
 Mouse Features:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2994,6 +3014,15 @@ Keyboard Shortcuts:
             return
         if user_input.lower() == "/model":
             self._enter_model_mode()
+            return
+        if user_input.lower().startswith("/mode"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 1:
+                self.append_message("system", f"Current runtime mode: {getattr(config, 'RUNTIME_MODE', 'classic')}")
+            else:
+                mode_name = parts[1].strip().lower()
+                if not self._set_runtime_mode(mode_name):
+                    self.append_message("system", "Usage: /mode classic | /mode wave")
             return
         if user_input.lower() == "/tree":
             self.show_system_tree()

@@ -26,6 +26,7 @@ import libzim
 from chatbot.rag import RAGSystem, TextProcessor
 from chatbot import config
 from chatbot.chat import build_messages, stream_chat, clear_runtime_memory
+from chatbot.model_manager import ModelManager
 from chatbot.models import Message
 
 class ChatbotCLI(cmd.Cmd):
@@ -61,6 +62,22 @@ class ChatbotCLI(cmd.Cmd):
         self.history.clear()
         clear_runtime_memory(reset_rag=False)
         print("Session memory cleared.")
+
+    def do_mode(self, arg):
+        """Show or change runtime mode: mode [classic|wave]"""
+        mode = (arg or "").strip().lower()
+        if not mode:
+            print(f"Current runtime mode: {getattr(config, 'RUNTIME_MODE', 'classic')}")
+            return
+        if mode not in {"classic", "wave"}:
+            print("Usage: mode classic | mode wave")
+            return
+        previous = getattr(config, 'RUNTIME_MODE', 'classic')
+        config.RUNTIME_MODE = mode
+        self.history.clear()
+        clear_runtime_memory(reset_rag=False)
+        ModelManager.close_all()
+        print(f"Runtime mode set to {mode} (was {previous}). Session memory cleared.")
 
     def do_tree(self, arg):
         """Show the current runtime model tree."""

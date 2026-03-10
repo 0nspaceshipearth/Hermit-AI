@@ -657,6 +657,46 @@ class ModelManager:
     _instances: Dict[str, Any] = {}
     _active_model: Optional[Dict[str, Any]] = None
 
+    @classmethod
+    def _runtime_mode(cls) -> str:
+        return str(getattr(config, "RUNTIME_MODE", "classic") or "classic").strip().lower()
+
+    @classmethod
+    def _wave_mode_enabled(cls) -> bool:
+        return cls._runtime_mode() == "wave"
+
+    @classmethod
+    def _find_cached_local_model(cls, model_path: str, min_ctx: int) -> Optional[Any]:
+        best_instance = None
+        best_ctx = None
+        best_meta = None
+        for key, instance in cls._instances.items():
+            if not key.startswith("local::"):
+                continue
+            parts = key.split("::")
+            if len(parts) < 3:
+                continue
+            cached_path = parts[1]
+            try:
+                cached_ctx = int(parts[2])
+            except Exception:
+                continue
+            if cached_path != model_path or cached_ctx < min_ctx:
+                continue
+            if best_ctx is None or cached_ctx < best_ctx:
+                best_instance = instance
+                best_ctx = cached_ctx
+                best_meta = {
+                    "cache_key": key,
+                    "kind": "local",
+                    "model_path": model_path,
+                    "n_ctx": cached_ctx,
+                    "requested_n_ctx": min_ctx,
+                }
+        if best_instance is not None:
+            cls._active_model = best_meta
+        return best_instance
+
     @staticmethod
     def _is_large_model_id(model_id: str) -> bool:
         lower = (model_id or "").lower()
@@ -918,7 +958,8 @@ class ModelManager:
                     if active_instance is not None:
                         return active_instance
 
-                cls.close_all()
+                if not cls._wave_mode_enabled():
+                    cls.close_all()
                 print(f"DEBUG: API Mode Enabled. Connecting to {config.API_BASE_URL}...")
                 from chatbot.api_client import OpenAIClientWrapper
 
@@ -987,7 +1028,13 @@ class ModelManager:
                         print(f"Reusing active default model for auxiliary task: {default_id}")
                         return active_instance
 
-            cls.close_all()
+            if cls._wave_mode_enabled():
+                cached_wave_instance = cls._find_cached_local_model(model_path, n_ctx)
+                if cached_wave_instance is not None:
+                    print(f"Reusing hot-loaded model {model_name} in wave mode (ctx>={n_ctx})")
+                    return cached_wave_instance
+            else:
+                cls.close_all()
 
             gpus = _detect_gpu_inventory()
             gpu_enabled = _llama_gpu_offload_enabled() and bool(gpus)

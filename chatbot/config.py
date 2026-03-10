@@ -64,6 +64,11 @@ USE_JOINTS = True
 #   - Tier 3 (3B): multi-hop + comparison reasoning
 #   - Final generation: DEFAULT_MODEL
 
+# Runtime architecture mode:
+#   classic = aggressive unload/reload between model tiers (stable default)
+#   wave    = keep loaded tiers hot in memory and simulate resets at the prompt/state level
+RUNTIME_MODE = "classic"
+
 # Optional aux-task reuse: if the default model is already loaded, some helper tasks
 # may reuse it to avoid load/unload thrash. Large defaults stay blocked by default.
 PREFER_DEFAULT_MODEL_FOR_AUX = True
