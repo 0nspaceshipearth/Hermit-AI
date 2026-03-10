@@ -91,14 +91,21 @@ class ChatbotCLI(cmd.Cmd):
             ("Multi-hop reasoning", "MULTI_HOP_JOINT_MODEL"),
             ("Comparison synthesis", "COMPARISON_JOINT_MODEL"),
         ]
+        mode = getattr(config, 'RUNTIME_MODE', 'classic')
         print("\nHermit Runtime Tree")
         print("===================")
+        print(f"Mode: {mode}")
         print("User Query")
         print("  ├─ Entity / Score / Filter")
         print("  ├─ Fact / Refine / Multi-hop / Compare")
         print("  └─ Final synthesis\n")
-        for label, attr in slots:
-            print(f"- {label}: {getattr(config, attr, '(unset)')}")
+        if mode == 'wave':
+            selected = getattr(config, 'DEFAULT_MODEL', '(unset)')
+            for label, _attr in slots:
+                print(f"- {label}: {selected} [wave]")
+        else:
+            for label, attr in slots:
+                print(f"- {label}: {getattr(config, attr, '(unset)')}")
         print("")
 
     def do_search(self, arg):

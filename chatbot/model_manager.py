@@ -946,7 +946,12 @@ class ModelManager:
         Get or load a Llama model instance.
         Enforces single-model policy to prevent VRAM OOM.
         Uses 8192 context by default to accommodate RAG content.
+        In wave mode, all local inference collapses onto the selected default model.
         """
+        requested_repo_id = repo_id
+        if cls._wave_mode_enabled() and not config.API_MODE:
+            repo_id = getattr(config, "DEFAULT_MODEL", repo_id)
+            prefer_default = False
         model_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
 
         try:
@@ -1142,6 +1147,8 @@ class ModelManager:
                         f"✅ Model {repo_id} loaded successfully using: {desc} "
                         f"(arch={architecture}, ctx={current_ctx}, gpu_layers={current_layers})"
                     )
+                    if cls._wave_mode_enabled() and requested_repo_id != repo_id:
+                        print(f"🌊 Wave mode routed request for {requested_repo_id} -> {repo_id}")
                     return llm
 
                 except Exception as e:

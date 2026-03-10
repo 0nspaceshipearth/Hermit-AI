@@ -1507,7 +1507,8 @@ class ChatbotGUI:
         sections: List[dict] = []
 
         def build_section(slot_id: str, label: str, config_attr: str):
-            current_model = getattr(config, config_attr, config.DEFAULT_MODEL)
+            mode = getattr(config, 'RUNTIME_MODE', 'classic')
+            current_model = config.DEFAULT_MODEL if mode == 'wave' else getattr(config, config_attr, config.DEFAULT_MODEL)
 
             section_frame = self.tk.Frame(container, bg=panel_bg)
             section_frame.pack(fill=self.tk.X, padx=14, pady=6)
