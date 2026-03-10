@@ -65,6 +65,32 @@ class TestCliCheckpointArtifacts(unittest.TestCase):
             self.assertEqual(latest["mode"], "file_write")
             self.assertEqual(latest["status"], "ok")
 
+    def test_script_create_routes_through_contract_and_sets_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "runme.sh")
+            envelope = TeleportEnvelope(
+                contract_version="teleport.v1",
+                intent="script_create",
+                source_mode="wave",
+                target_mode="chamber",
+                objective="create a bash script",
+                constraints={"target_path": target, "language": "bash"},
+            )
+
+            result = self.cli._execute_file_write_from_response(
+                envelope,
+                "[HERMIT_FILE]#!/bin/bash\necho hi\n[/HERMIT_FILE]",
+            )
+            checkpoint = load_runtime_checkpoint()
+
+            self.assertIn("Script written successfully", result)
+            self.assertIn("Executable: yes", result)
+            self.assertTrue(os.path.exists(target))
+            self.assertTrue(os.stat(target).st_mode & 0o111)
+            latest = checkpoint["artifacts"][-1]
+            self.assertEqual(latest["mode"], "script_create")
+            self.assertEqual(latest["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

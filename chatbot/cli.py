@@ -34,7 +34,6 @@ from chatbot.models import Message
 from chatbot.teleport import (
     execute_teleport_contract,
     execute_shell_command,
-    execute_file_write,
     TeleportEnvelope,
     TeleportResult,
     wave_mode_enabled,
@@ -620,7 +619,7 @@ class ChatbotCLI(cmd.Cmd):
         return None, False
 
     def _execute_file_write_from_response(self, envelope, response):
-        """Execute a file write using LLM-generated content.
+        """Execute a file/script creation using LLM-generated content.
 
         Args:
             envelope: The teleport envelope with target_path constraint
@@ -650,34 +649,38 @@ class ChatbotCLI(cmd.Cmd):
                 "markdown": ".md",
             }
             ext = ext_map.get(language, ".txt")
-            target_path = os.path.join(str(self.cwd), f"generated_file{ext}")
+            stem = "generated_script" if envelope.intent == "script_create" else "generated_file"
+            target_path = os.path.join(str(self.cwd), f"{stem}{ext}")
             envelope.constraints["target_path"] = target_path
 
-        # Execute the write
-        result = execute_file_write(envelope, content)
+        # Route through contract executor so script_create gets executable scaffolding behavior.
+        result = execute_teleport_contract(envelope, content)
 
         if result.ok:
             artifact = result.artifact or {}
+            kind_label = "script" if envelope.intent == "script_create" else "file"
             self._record_chamber_artifact(
                 envelope,
                 "ok",
-                f"file written: {artifact.get('path', target_path)}",
+                f"{kind_label} written: {artifact.get('path', target_path)}",
                 payload=artifact,
             )
+            executable = "\nExecutable: yes" if artifact.get("executable") else ""
             return (
-                f"✅ File written successfully\n"
+                f"✅ {kind_label.capitalize()} written successfully\n"
                 f"Path: {artifact.get('path', target_path)}\n"
                 f"Size: {artifact.get('size', len(content))} chars\n"
                 f"Type: {artifact.get('kind', 'file')}"
+                f"{executable}"
             )
         else:
             self._record_chamber_artifact(
                 envelope,
                 "error",
-                f"file write failed: {result.status}",
+                f"{envelope.intent} failed: {result.status}",
                 payload=result.artifact or {"message": result.message},
             )
-            return f"❌ File write failed: {result.status} — {result.message}"
+            return f"❌ {envelope.intent} failed: {result.status} — {result.message}"
 
     def _file_generation_contract(self, envelope: TeleportEnvelope) -> str:
         """Build strict output instructions for file/script creation flows."""
