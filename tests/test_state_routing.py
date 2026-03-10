@@ -62,6 +62,17 @@ class TestStateRouting(unittest.TestCase):
         self.assertEqual(report["artifact_summary"]["by_mode"]["retrieval_tool"], 1)
         self.assertEqual(report["artifact_summary"]["latest"]["step"], "targeted_search")
 
+    def test_residue_snapshot_includes_base_mind_contract(self):
+        ctx = HermitContext(original_query="Who created Python?")
+        ctx.update_ofr_residue(step="router_query", status="ok")
+
+        snapshot = ctx.residue_snapshot(limit=3)
+
+        self.assertIn("base_mind", snapshot)
+        self.assertEqual(snapshot["base_mind"]["objective"], "factual_lookup")
+        self.assertIn("routing", snapshot["base_mind"])
+        self.assertIn("steps", snapshot["base_mind"])
+
 
 if __name__ == "__main__":
     unittest.main()

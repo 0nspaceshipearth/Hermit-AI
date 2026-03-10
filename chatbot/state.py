@@ -352,12 +352,39 @@ class HermitContext:
             residue=residue_brief,
         )
 
+    def base_mind_snapshot(self) -> Dict[str, Any]:
+        """Return a compact base-mind frame for planners/inspectors.
+
+        This intentionally overlaps with objective_frontier_risk to preserve
+        compatibility while exposing a clearer contract for future base-mind
+        controllers.
+        """
+        return {
+            "objective": self.active_goal,
+            "frontier": list(self.current_plan[:3]),
+            "routing": {
+                "mode": self.routing_mode,
+                "reason": self.routing_reason,
+            },
+            "risk": self.ofr_residue.risk if self.ofr_residue else "unknown",
+            "signals": {
+                "ambiguity_score": float(self.signals.get("ambiguity_score", 0.0)),
+                "highest_source_score": float(self.signals.get("highest_source_score", 0.0)),
+                "coverage_ratio": float(self.signals.get("coverage_ratio", 0.0)),
+            },
+            "steps": {
+                "executed": int(self.signals.get("step_counter", 0)),
+                "remaining": len(self.current_plan),
+            },
+        }
+
     def residue_snapshot(self, limit: int = 12) -> Dict[str, Any]:
         """Return a compact serializable view of residue/events for downstream use."""
         return {
             "active_goal": self.active_goal,
             "routing_mode": self.routing_mode,
             "routing_reason": self.routing_reason,
+            "base_mind": self.base_mind_snapshot(),
             "objective_frontier_risk": {
                 "objective": self.ofr_residue.objective,
                 "frontier": list(self.ofr_residue.frontier),
