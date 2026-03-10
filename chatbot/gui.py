@@ -1058,9 +1058,18 @@ class ChatbotGUI:
 
     def _apply_model_selection(self, model_name: str):
         if model_name != self.model:
+            old_model = self.model
             self.model = model_name
+            config.DEFAULT_MODEL = model_name
             self.root.title(f"Chatbot - {model_name} ({'Link Mode' if self.link_mode else 'Response Mode'})")
-            self.append_message("system", f"Model changed to: {model_name}")
+            self.history.clear()
+            self.query_history.clear()
+            clear_runtime_memory(reset_rag=False)
+            try:
+                ModelManager.close_all()
+            except Exception:
+                pass
+            self.append_message("system", f"Model changed: {old_model} → {model_name}. Session memory cleared and loaded models flushed.")
             self.update_status(f"Model: {model_name}")
 
     def _handle_model_input(self, user_input: str):
