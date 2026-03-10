@@ -23,9 +23,13 @@ class OpenAIClientWrapper:
         print(f"Initialized API Client: {self.base_url} (Model: {self.model_name})")
 
     def _is_codex_oauth_mode(self) -> bool:
-        # Codex OAuth tokens are not standard sk- API keys.
+        # Codex OAuth tokens are not standard sk- API keys and typically target ChatGPT backend APIs.
         key = (self.api_key or "").strip()
-        return self.base_url.startswith("https://api.openai.com") and bool(key) and not key.startswith("sk-")
+        is_oauthish = bool(key) and not key.startswith("sk-")
+        return is_oauthish and (
+            self.base_url.startswith("https://chatgpt.com/backend-api")
+            or self.base_url.startswith("https://api.openai.com")
+        )
 
     def _chat_headers(self) -> Dict[str, str]:
         headers = {
@@ -35,6 +39,9 @@ class OpenAIClientWrapper:
         account_id = getattr(config, "API_ACCOUNT_ID", "")
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id
+        if self.base_url.startswith("https://chatgpt.com/backend-api"):
+            headers["Origin"] = "https://chatgpt.com"
+            headers["Referer"] = "https://chatgpt.com/"
         return headers
 
     def create_chat_completion(
@@ -114,7 +121,8 @@ class OpenAIClientWrapper:
                         continue
 
     def _blocking_responses(self, messages, max_tokens=None, temperature=0.7, top_p=0.95):
-        url = f"{self.base_url}/responses"
+        path = "/codex/responses" if self.base_url.startswith("https://chatgpt.com/backend-api") else "/responses"
+        url = f"{self.base_url}{path}"
         headers = self._chat_headers()
         payload = {
             "model": self.model_name,
@@ -144,7 +152,8 @@ class OpenAIClientWrapper:
         }
 
     def _stream_responses(self, messages, max_tokens=None, temperature=0.7, top_p=0.95):
-        url = f"{self.base_url}/responses"
+        path = "/codex/responses" if self.base_url.startswith("https://chatgpt.com/backend-api") else "/responses"
+        url = f"{self.base_url}{path}"
         headers = self._chat_headers()
         payload = {
             "model": self.model_name,

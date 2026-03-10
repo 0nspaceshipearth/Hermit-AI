@@ -1417,7 +1417,7 @@ class ChatbotGUI:
                     access = (creds or {}).get("access", "")
                     if access:
                         config.API_MODE = True
-                        config.API_BASE_URL = "https://api.openai.com/v1"
+                        config.API_BASE_URL = "https://chatgpt.com/backend-api"
                         config.API_KEY = access
                         config.API_ACCOUNT_ID = (creds or {}).get("accountId", "") or ""
                         config.API_MODEL_NAME = getattr(config, "CODEX_CLOUD_DEFAULT_MODEL", "gpt-5.3-codex")
