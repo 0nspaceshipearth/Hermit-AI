@@ -38,6 +38,7 @@ from chatbot.agent_runtime import (
     execute_file_write_from_response,
     file_generation_contract,
     record_chamber_artifact,
+    handle_turn,
 )
 
 
@@ -630,115 +631,39 @@ class ChatbotCLI(cmd.Cmd):
 
         print(f"\nThinking...")
         try:
-            messages, intent = build_messages_with_intent(config.SYSTEM_PROMPT, self.history)
+            turn = handle_turn(
+                system_prompt=config.SYSTEM_PROMPT,
+                history=self.history,
+                workspace=str(self.cwd),
+                execute_teleport=execute_teleport_for_workspace,
+                build_messages_fn=build_messages,
+                build_messages_with_intent_fn=build_messages_with_intent,
+                generate_text_fn=lambda messages: self._agentic_generate(messages),
+                execute_file_write_fn=execute_file_write_from_response,
+            )
 
-            # === AGENTIC TELEPORT PATH (wave mode) ===
-            if (
-                wave_mode_enabled()
-                and intent.shell_intent
-                and intent.teleport_envelope
-                and not intent.teleport_envelope.constraints.get("refused")
-            ):
-                envelope = intent.teleport_envelope
-                teleport_result = self._execute_teleport(envelope)
+            if turn.path == "wave_shell" and turn.display_text:
+                print(f"\n📡 Teleport [shell_command]\n")
+                print(turn.display_text)
+                print("\nHermit: ", end="", flush=True)
+                print(turn.assistant_reply + "\n")
+                full_response = self._run_follow_up_commands(turn.assistant_reply, max_rounds=5)
+                self.history.append(Message(role="assistant", content=full_response))
+                return
 
-                if teleport_result is not None:
-                    # We executed a command — feed the real output back to the LLM
-                    print(f"\n📡 Teleport [{envelope.intent}]\n")
-                    print(teleport_result)
+            if turn.path == "wave_file":
+                print(f"Hermit: {turn.assistant_reply}\n")
+                if turn.display_text:
+                    print(f"\n📡 Teleport [{getattr(turn.intent, 'shell_intent', 'file_write')}]")
+                    print(turn.display_text)
+                    summary = f"{turn.assistant_reply}\n\n[System: {turn.display_text}]"
+                    self.history.append(Message(role="assistant", content=summary))
+                else:
+                    print("\n❌ File write canceled: model response did not include a valid [HERMIT_FILE] block or code fence.")
+                    self.history.append(Message(role="assistant", content=turn.assistant_reply))
+                return
 
-                    # Inject the excursion result as context for LLM synthesis
-                    observation_msg = (
-                        f"[SHELL CHAMBER OBSERVATION]\n"
-                        f"Intent: {envelope.intent}\n"
-                        f"Command: {envelope.constraints.get('command', envelope.objective)}\n"
-                        f"Working directory: {self.cwd}\n"
-                        f"Result:\n{teleport_result}\n"
-                        f"[/SHELL CHAMBER OBSERVATION]\n\n"
-                        f"Summarize the result for the user. If you need to run another command, "
-                        f"output it inside [HERMIT_CMD]command here[/HERMIT_CMD] tags."
-                    )
-                    self.history.append(Message(role="assistant", content=f"[Executed: {envelope.constraints.get('command', '')}]"))
-                    self.history.append(Message(role="user", content=observation_msg))
-                    messages = build_messages(config.SYSTEM_PROMPT, self.history)
-
-                    print(f"\nHermit: ", end="", flush=True)
-                    full_response = self._agentic_generate(messages)
-                    print("\n")
-
-                    full_response = self._run_follow_up_commands(full_response, max_rounds=5)
-                    self.history.append(Message(role="assistant", content=full_response))
-                    return
-
-                # teleport_result is None → file_write/script_create needs LLM-generated content
-                # Fall through to normal generation, the system prompt already has instructions
-
-            # === NORMAL CHAT PATH ===
-            if (
-                wave_mode_enabled()
-                and intent.shell_intent in ("file_write", "script_create")
-                and intent.teleport_envelope
-                and not intent.teleport_envelope.constraints.get("refused")
-                and messages
-            ):
-                messages = [dict(m) for m in messages]
-                messages[0]["content"] = messages[0].get("content", "") + self._file_generation_contract(intent.teleport_envelope)
-
-            print(f"Hermit: ", end="", flush=True)
-            full_response = ""
-            for chunk in stream_chat(self.model_name, messages):
-                print(chunk, end="", flush=True)
-                full_response += chunk
-            print("\n")
-
-            # In wave mode, check if the LLM output contains a command to execute
-            if wave_mode_enabled():
-                agent_cmd = self._extract_agent_command(full_response)
-                if agent_cmd:
-                    print(f"\n📡 Agent command: {agent_cmd}")
-                    auto_envelope = TeleportEnvelope(
-                        contract_version="teleport.v1",
-                        intent="shell_command",
-                        source_mode="wave",
-                        target_mode="chamber",
-                        objective=agent_cmd,
-                        constraints={
-                            "workspace": str(self.cwd),
-                            "command": agent_cmd,
-                            "requires_confirmation": False,
-                            "allow_prose_fallback": False,
-                        },
-                    )
-                    cmd_result = self._execute_teleport(auto_envelope)
-                    if cmd_result:
-                        print(cmd_result)
-                        self.history.append(Message(role="assistant", content=full_response))
-                        self.history.append(Message(role="user", content=f"[SHELL CHAMBER OBSERVATION]\n{cmd_result}\n[/SHELL CHAMBER OBSERVATION]"))
-                        messages = build_messages(config.SYSTEM_PROMPT, self.history)
-                        print(f"\nHermit: ", end="", flush=True)
-                        full_response = self._agentic_generate(messages)
-                        print("\n")
-                        full_response = self._run_follow_up_commands(full_response, max_rounds=5)
-                        self.history.append(Message(role="assistant", content=full_response))
-                        return
-
-                # If this was a file_write intent with an envelope, execute the write now
-                if intent.shell_intent in ("file_write", "script_create") and intent.teleport_envelope:
-                    write_result = self._execute_file_write_from_response(intent.teleport_envelope, full_response)
-                    if write_result:
-                        print(f"\n📡 Teleport [{intent.shell_intent}]")
-                        print(write_result)
-                        # Add a summary to history
-                        summary = f"{full_response}\n\n[System: {write_result}]"
-                        self.history.append(Message(role="assistant", content=summary))
-                        return
-                    else:
-                        print("\n❌ File write canceled: model response did not include a valid [HERMIT_FILE] block or code fence.")
-                        self.history.append(Message(role="assistant", content=full_response))
-                        return
-
-            self.history.append(Message(role="assistant", content=full_response))
-
+            self.history.append(Message(role="assistant", content=turn.assistant_reply))
         except KeyboardInterrupt:
             print("\n[Interrupted]")
         except Exception as e:

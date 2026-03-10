@@ -8,11 +8,33 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from chatbot import config
+from chatbot.models import Message
 
 from chatbot.chat import load_runtime_checkpoint, save_runtime_checkpoint
 from chatbot.teleport import execute_file_write, execute_teleport_contract, detect_command, TeleportEnvelope
+
+
+@dataclass
+class RuntimeEvent:
+    kind: str
+    text: str
+    data: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RuntimeTurnResult:
+    handled: bool
+    path: str
+    assistant_reply: str = ""
+    display_text: str = ""
+    messages: List[dict] = field(default_factory=list)
+    events: List[RuntimeEvent] = field(default_factory=list)
+    intent: Any = None
 
 
 def _compact_artifact_payload(payload: Optional[dict], max_text: int = 800) -> dict:
@@ -190,3 +212,81 @@ def file_generation_contract(envelope: TeleportEnvelope) -> str:
         "- Do not include explanations, prefaces, or markdown outside the tags.\n"
         "- If the task is impossible, return [HERMIT_FILE]# unable to generate requested file[/HERMIT_FILE].\n"
     )
+
+
+def handle_turn(
+    system_prompt: str,
+    history: List[Message],
+    workspace: str,
+    execute_teleport: Callable[[TeleportEnvelope, str], Optional[str]],
+    build_messages_fn: Callable[..., List[dict]],
+    build_messages_with_intent_fn: Callable[..., Tuple[List[dict], Any]],
+    generate_text_fn: Callable[[List[dict]], str],
+    execute_file_write_fn: Optional[Callable[[TeleportEnvelope, str, str], Optional[str]]] = None,
+) -> RuntimeTurnResult:
+    """Shared runtime turn handler for CLI/GUI/TUI frontends.
+
+    This is intentionally modest for the first pass: it centralizes the major
+    Wave/classic branching so frontends stop reinventing the same logic.
+    """
+    execute_file_write_fn = execute_file_write_fn or execute_file_write_from_response
+
+    messages, intent = build_messages_with_intent_fn(system_prompt, history)
+    result = RuntimeTurnResult(handled=False, path="normal", messages=messages, intent=intent)
+
+    if (
+        str(getattr(config, "RUNTIME_MODE", "classic") or "classic").lower() == "wave"
+        and getattr(intent, "shell_intent", None)
+        and getattr(intent, "teleport_envelope", None)
+        and not intent.teleport_envelope.constraints.get("refused")
+    ):
+        envelope = intent.teleport_envelope
+
+        if envelope.intent == "shell_command":
+            teleport_result = execute_teleport(envelope, workspace)
+            if teleport_result is not None:
+                observation_msg = (
+                    f"[SHELL CHAMBER OBSERVATION]\n"
+                    f"Intent: {envelope.intent}\n"
+                    f"Command: {envelope.constraints.get('command', envelope.objective)}\n"
+                    f"Working directory: {workspace}\n"
+                    f"Result:\n{teleport_result}\n"
+                    f"[/SHELL CHAMBER OBSERVATION]\n\n"
+                    f"Summarize the result for the user. If you need to run another command, "
+                    f"output it inside [HERMIT_CMD]command here[/HERMIT_CMD] tags."
+                )
+                turn_history = list(history) + [
+                    Message(role="assistant", content=f"[Executed: {envelope.constraints.get('command', '')}]"),
+                    Message(role="user", content=observation_msg),
+                ]
+                follow_messages = build_messages_fn(system_prompt, turn_history)
+                assistant_reply = generate_text_fn(follow_messages)
+                result.handled = True
+                result.path = "wave_shell"
+                result.assistant_reply = assistant_reply
+                result.display_text = teleport_result
+                result.messages = follow_messages
+                result.events.append(RuntimeEvent(kind="teleport", text=teleport_result, data={"intent": envelope.intent}))
+                return result
+
+        if envelope.intent in ("file_write", "script_create"):
+            gen_messages = [dict(m) for m in messages]
+            if gen_messages:
+                gen_messages[0]["content"] = gen_messages[0].get("content", "") + file_generation_contract(envelope)
+            assistant_reply = generate_text_fn(gen_messages)
+            write_result = execute_file_write_fn(envelope, assistant_reply, workspace)
+            result.handled = True
+            result.path = "wave_file"
+            result.assistant_reply = assistant_reply
+            result.display_text = write_result or ""
+            result.messages = gen_messages
+            if write_result:
+                result.events.append(RuntimeEvent(kind="artifact", text=write_result, data={"intent": envelope.intent}))
+            return result
+
+    # normal / classic path
+    assistant_reply = generate_text_fn(messages)
+    result.handled = True
+    result.assistant_reply = assistant_reply
+    result.display_text = assistant_reply
+    return result
