@@ -20,6 +20,7 @@
 import re
 import sys
 from dataclasses import dataclass
+from typing import Optional, Tuple
 from chatbot import config
 
 def debug_print(msg: str):
@@ -31,6 +32,8 @@ class IntentResult:
     should_retrieve: bool
     system_instruction: str
     mode_name: str
+    shell_intent: Optional[str] = None  # Set if shell operation detected
+    teleport_envelope: Optional[object] = None  # TeleportEnvelope if shell intent
 
 
 @dataclass
@@ -220,7 +223,86 @@ def detect_intent(query: str) -> IntentResult:
             mode_name="DEBATE"
         )
 
-    # 4. FACTUAL / DEFAULT (The "Rest")
+    # 4. SHELL / TELEPORT (Shell Chamber Operations)
+    # Trigger: File writes, script creation, shell commands
+    debug_print("Testing SHELL patterns...")
+    from chatbot.teleport import build_shell_envelope, wave_mode_enabled
+    
+    envelope = build_shell_envelope(query)
+    if envelope is not None:
+        shell_intent = envelope.intent
+        debug_print(f"MATCH: SHELL pattern matched -> intent={shell_intent}")
+        
+        # Check if this is a refused teleport (wave mode required)
+        if envelope.constraints.get("refused"):
+            debug_print("SHELL intent but wave mode not enabled -> providing guidance")
+            return IntentResult(
+                should_retrieve=False,
+                system_instruction=(
+                    "\nMODE: SHELL TELEPORT REQUIRED\n"
+                    "The user is requesting a file/shell operation that requires the Shell Chamber.\n"
+                    "IMPORTANT: This requires Wave mode. Do NOT provide a text-only approximation.\n"
+                    "Instead, explain that you need Wave mode to safely execute this operation.\n"
+                    "To enable: type 'mode wave' in the CLI, or set RUNTIME_MODE=wave in config.\n"
+                    "This is a safety boundary - do not fake execution with text output."
+                ),
+                mode_name="SHELL_BLOCKED",
+                shell_intent=shell_intent,
+                teleport_envelope=envelope,
+            )
+        
+        # Wave mode is active - prepare for teleport
+        debug_print(f"Decision: should_retrieve=False (shell mode - will teleport)")
+        
+        # Determine instruction based on intent type
+        if shell_intent == "file_write":
+            mode_instruction = (
+                "\nMODE: SHELL TELEPORT - FILE WRITE\n"
+                "OBJECTIVE: Write a file via the Shell Chamber.\n"
+                "INSTRUCTIONS:\n"
+                "1. You will be teleported to a shell chamber to write the file.\n"
+                "2. Generate the appropriate file content based on the user's request.\n"
+                "3. The file will be written to the target path safely.\n"
+                "4. Do NOT output the file content as text - it will be written directly.\n"
+                "5. After teleport, confirm the operation completed successfully."
+            )
+        elif shell_intent == "shell_command":
+            mode_instruction = (
+                "\nMODE: SHELL TELEPORT - COMMAND\n"
+                "OBJECTIVE: Execute a shell command via the Shell Chamber.\n"
+                "INSTRUCTIONS:\n"
+                "1. You will be teleported to a shell chamber to execute the command.\n"
+                "2. The command will run in a bounded workspace with timeout limits.\n"
+                "3. Report the results back to the user clearly.\n"
+                "4. Do NOT simulate output - execute the real command."
+            )
+        elif shell_intent == "script_create":
+            mode_instruction = (
+                "\nMODE: SHELL TELEPORT - SCRIPT CREATE\n"
+                "OBJECTIVE: Create an executable script via the Shell Chamber.\n"
+                "INSTRUCTIONS:\n"
+                "1. You will be teleported to a shell chamber to create the script.\n"
+                "2. Generate appropriate script content with proper scaffolding.\n"
+                "3. The script will be saved with executable permissions.\n"
+                "4. After teleport, confirm creation and provide usage instructions."
+            )
+        else:
+            mode_instruction = (
+                "\nMODE: SHELL TELEPORT\n"
+                "OBJECTIVE: Execute a shell operation via the Shell Chamber.\n"
+                "The chamber provides safe execution with proper boundaries.\n"
+            )
+        
+        return IntentResult(
+            should_retrieve=False,
+            system_instruction=mode_instruction,
+            mode_name="SHELL",
+            shell_intent=shell_intent,
+            teleport_envelope=envelope,
+        )
+    debug_print("No SHELL pattern matched")
+
+    # 5. FACTUAL / DEFAULT (The "Rest")
     # Trigger: "What is", "Who is", "When", "Define", or any specific query
     debug_print("No specific pattern matched -> FACTUAL (default) mode")
     debug_print("Decision: should_retrieve=True (factual mode)")
@@ -237,3 +319,42 @@ def detect_intent(query: str) -> IntentResult:
         ),
         mode_name="FACTUAL"
     )
+
+def has_shell_intent(query: str) -> Tuple[bool, Optional[str]]:
+    """Quick check if query has shell intent without full intent detection.
+    
+    Args:
+        query: User query string
+        
+    Returns:
+        (has_shell, intent_type) - True if shell intent detected, with the intent type
+    """
+    from chatbot.teleport import classify_shell_intent, ShellIntent
+    
+    intent = classify_shell_intent(query)
+    if intent != ShellIntent.UNKNOWN:
+        return True, intent.value
+    return False, None
+
+
+def check_teleport_available(query: str) -> Tuple[bool, str]:
+    """Check if teleport is available for this query.
+    
+    Args:
+        query: User query string
+        
+    Returns:
+        (available, message) - Whether teleport is available and why/why not
+    """
+    has_shell, intent_type = has_shell_intent(query)
+    
+    if not has_shell:
+        return True, "No shell intent detected - normal chat flow"
+    
+    from chatbot.teleport import wave_mode_enabled, require_wave_mode
+    
+    is_wave, msg = require_wave_mode()
+    if is_wave:
+        return True, f"Wave mode active - {intent_type} teleport available"
+    
+    return False, msg
