@@ -1304,12 +1304,12 @@ class ChatbotGUI:
         threading.Thread(target=run_test, daemon=True).start()
 
     def _enter_cloud_mode(self):
-        items = ["openai"]
+        items = [getattr(config, "CODEX_CLOUD_PROVIDER", "openai-codex")]
         self.command_mode = {
             "name": "cloud",
             "type": "menu",
             "items": items,
-            "display": ["OpenAI"],
+            "display": ["OpenAI Codex"],
             "index": 0,
             "pending": None,
         }
@@ -1319,21 +1319,17 @@ class ChatbotGUI:
         items = self.command_mode.get("items", [])
         display = self.command_mode.get("display", [])
         idx = self.command_mode.get("index", 0)
-        pending = self.command_mode.get("pending")
         lines = []
         for i, name in enumerate(items):
             marker = ">" if i == idx else " "
             label = display[i] if i < len(display) else name.title()
             lines.append(f"{marker} {i+1}. {label}")
 
-        if pending:
-            footer = pending.get("prompt", "Paste your API key or Esc to cancel.")
-        else:
-            footer = "Use Up/Down and Enter. Enter opens the browser auth page for the selected provider."
+        footer = "Use Up/Down and Enter. Enter launches the OpenClaw Codex login flow for the selected provider."
 
         text = (
             "CLOUD PROVIDERS\n"
-            "OpenAI-only in this build.\n\n"
+            "Codex/OpenAI auth only in this build.\n\n"
             + "\n".join(lines)
             + "\n\n"
             + footer
@@ -1341,57 +1337,43 @@ class ChatbotGUI:
         self._render_terminal_menu(text)
 
     def _activate_cloud_provider(self, provider: str):
-        if provider != "openai":
+        expected = getattr(config, "CODEX_CLOUD_PROVIDER", "openai-codex")
+        if provider != expected:
             self.append_message("system", f"Unsupported cloud provider: {provider}")
             return
-        auth_url = getattr(config, "OPENAI_CLOUD_AUTH_URL", "https://platform.openai.com/settings/organization/api-keys")
-        try:
-            webbrowser.open(auth_url)
-            self.append_message("system", "Opened OpenAI auth in your browser. Create or copy an API key, then paste it here.")
-        except Exception as e:
-            self.append_message("system", f"Could not open browser automatically: {e}. Open this URL manually: {auth_url}")
 
-        self.command_mode["pending"] = {
-            "action": "openai_key",
-            "provider": "openai",
-            "prompt": "Paste your OpenAI API key, or type cancel.",
-        }
-        self._render_cloud_menu()
+        login_command = getattr(config, "CODEX_CLOUD_LOGIN_COMMAND", "openclaw models auth login --provider openai-codex")
+        self.append_message("system", f"Starting Codex auth via OpenClaw: {login_command}")
 
-    def _save_openai_cloud_key(self, api_key: str):
-        key = (api_key or "").strip()
-        if not key:
-            self.append_message("system", "No API key provided.")
-            return
-        if not key.startswith("sk-"):
-            self.append_message("system", "That doesn't look like an OpenAI API key. Expected it to start with 'sk-'.")
-            return
+        def run_login():
+            try:
+                proc = subprocess.Popen(
+                    login_command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                output_lines = []
+                if proc.stdout:
+                    for line in proc.stdout:
+                        if line:
+                            output_lines.append(line.rstrip())
+                proc.wait()
+                if proc.returncode == 0:
+                    self._post_system("Codex auth completed. You can now pick Codex/OpenAI cloud models in /model.")
+                else:
+                    joined = "\n".join(output_lines[-8:]).strip()
+                    self._post_system(f"Codex auth failed (exit {proc.returncode}).{chr(10) + joined if joined else ''}")
+            except Exception as e:
+                self._post_system(f"Failed to start Codex auth flow: {e}")
 
-        config.API_MODE = True
-        config.API_BASE_URL = getattr(config, "OPENAI_CLOUD_BASE_URL", "https://api.openai.com/v1")
-        config.API_KEY = key
-        config.API_MODEL_NAME = getattr(config, "OPENAI_CLOUD_DEFAULT_MODEL", "gpt-4.1-mini")
-
-        from chatbot.model_manager import ModelManager
-        ModelManager.close_all()
-
-        self.model = config.API_MODEL_NAME
-        self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
-        self.append_message("system", "OpenAI cloud auth saved. Hermit is now using OpenAI API mode.")
-        self.update_status(f"API: {self.model}")
+        threading.Thread(target=run_login, daemon=True).start()
+        self._close_command_mode()
 
     def _handle_cloud_input(self, user_input: str):
         text = user_input.strip()
         lowered = text.lower()
-        pending = self.command_mode.get("pending")
-
-        if pending:
-            if lowered in {"cancel", "exit", "quit"}:
-                self._exit_command_mode(cancelled=True)
-                return
-            self._save_openai_cloud_key(text)
-            self._close_command_mode()
-            return
 
         if not text:
             items = self.command_mode.get("items", [])
@@ -2999,7 +2981,7 @@ class ChatbotGUI:
   /tree              Open model/joint system tree
   /status            Show system status
   /api               Configure external API mode
-  /cloud             Open OpenAI cloud auth menu
+  /cloud             Open Codex/OpenAI cloud auth menu
   /forge             Build a ZIM from local docs
   /mode              Show or change runtime architecture
 
