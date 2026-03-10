@@ -24,6 +24,7 @@ from tkinter import ttk, scrolledtext, messagebox
 import json
 import os
 import pty
+import re
 import select
 import subprocess
 import threading
@@ -3213,6 +3214,56 @@ Keyboard Shortcuts:
         
         help_window.bind("<KeyPress>", on_key)
     
+    def _maybe_handle_desktop_write_intent(self, user_input: str) -> bool:
+        """Best-effort NL shortcut: write generated Python script directly to Desktop."""
+        text = (user_input or "").strip()
+        low = text.lower()
+        if not ("desktop" in low and "write" in low and "python" in low):
+            return False
+
+        filename = "desktop_script.py"
+        m = re.search(r"(?:as|named)\s+([a-zA-Z0-9_.-]+\.py)\b", text, flags=re.IGNORECASE)
+        if m:
+            filename = m.group(1)
+        elif "clock" in low:
+            filename = "clock_app.py"
+
+        desktop_dir = os.path.expanduser("~/Desktop")
+        if not os.path.isdir(desktop_dir):
+            # Fallback if Desktop doesn't exist in this environment
+            desktop_dir = os.path.expanduser("~")
+
+        code_prompt = (
+            "Write a complete runnable Python script for this request. "
+            "Return ONLY python code, no markdown fences, no explanation.\n\n"
+            f"Request: {text}"
+        )
+
+        try:
+            # Use current model/provider and convert request into actual file output.
+            temp_history = [Message(role="user", content=code_prompt)]
+            messages = build_messages(self.system_prompt, temp_history, user_query=code_prompt)
+            code = full_chat(self.model, messages).strip()
+
+            fence_match = re.search(r"```(?:python)?\s*(.*?)```", code, flags=re.DOTALL | re.IGNORECASE)
+            if fence_match:
+                code = fence_match.group(1).strip()
+
+            if not code:
+                self.append_message("system", "Could not generate script content.")
+                return True
+
+            out_path = os.path.join(desktop_dir, filename)
+            with open(out_path, "w", encoding="utf-8") as handle:
+                handle.write(code + "\n")
+
+            self.append_message("system", f"Wrote script to: {out_path}")
+            self.append_message("system", f"Run with: python3 {out_path}")
+            return True
+        except Exception as e:
+            self.append_message("system", f"Desktop write failed: {e}")
+            return True
+
     def on_send(self, event=None):
         """Send message."""
         user_input = self.input_entry.get().strip()
@@ -3296,6 +3347,10 @@ Keyboard Shortcuts:
                 self._enter_forge_mode(parts[1].strip())
             else:
                 self._enter_forge_mode()
+            return
+
+        # Natural-language desktop write shortcut (teleport-style file action).
+        if self._maybe_handle_desktop_write_intent(user_input):
             return
         
         # Add to history and get response
