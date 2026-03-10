@@ -5,6 +5,7 @@ __pycache__/
 shared_models/
 data/index/
 data/indices/
+data/model_profiles.json
 *.log
 .DS_Store
 .github_deploy_key

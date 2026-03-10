@@ -61,98 +61,99 @@ class OrchestrationModule:
             payload={"query": query, "complexity": complexity.level},
         )
         
-        # Processing loop
-        while not ctx.is_complete():
-            step = ctx.pop_step()
-            if not step:
-                break
-                
-            ctx.log(f"▶ Executing step: {step}")
-            ctx.emit_event("step_started", step=step, status="info", message="dispatch")
+        try:
+            # Processing loop
+            while not ctx.is_complete():
+                step = ctx.pop_step()
+                if not step:
+                    break
 
-            # Dispatch to appropriate handler
-            try:
-                if not self._dispatch_orchestration_step(ctx, step):
-                    continue
+                ctx.log(f"▶ Executing step: {step}")
+                ctx.emit_event("step_started", step=step, status="info", message="dispatch")
 
-                ctx.add_residue(
-                    step,
-                    "ok",
-                    metrics={
-                        "ambiguity_score": float(ctx.signals.get("ambiguity_score", 0.0)),
-                        "highest_source_score": float(ctx.signals.get("highest_source_score", 0.0)),
-                        "coverage_ratio": float(ctx.signals.get("coverage_ratio", 0.0)),
-                    },
-                )
-                ctx.emit_event(
-                    "step_finished",
-                    step=step,
-                    status="ok",
-                    payload={
-                        "signals": {
+                # Dispatch to appropriate handler
+                try:
+                    if not self._dispatch_orchestration_step(ctx, step):
+                        continue
+
+                    ctx.add_residue(
+                        step,
+                        "ok",
+                        metrics={
                             "ambiguity_score": float(ctx.signals.get("ambiguity_score", 0.0)),
                             "highest_source_score": float(ctx.signals.get("highest_source_score", 0.0)),
                             "coverage_ratio": float(ctx.signals.get("coverage_ratio", 0.0)),
-                        }
-                    },
-                )
-                ctx.update_ofr_residue(step=step, status="ok")
-            except Exception as exc:
-                ctx.add_residue(step, "error", str(exc))
-                ctx.emit_event("step_finished", step=step, status="error", message=str(exc))
-                ctx.update_ofr_residue(step=step, status="error")
-                raise
-                
-            # Context gap hook: escalate to retrieval tool-paths when local results are weak.
-            gap_route = detect_gap_routing(ctx, step)
-            if gap_route and gap_route.mode == "retrieval_tools":
-                ctx.apply_routing(gap_route, step=f"router_gap:{step}")
-                if "expand" not in ctx.current_plan:
-                    ctx.add_step("expand", priority="normal")
-                if "targeted_search" not in ctx.current_plan:
-                    ctx.add_step("targeted_search", priority="normal")
-                ctx.update_ofr_residue(step=f"router_gap:{step}", status="ok")
+                        },
+                    )
+                    ctx.emit_event(
+                        "step_finished",
+                        step=step,
+                        status="ok",
+                        payload={
+                            "signals": {
+                                "ambiguity_score": float(ctx.signals.get("ambiguity_score", 0.0)),
+                                "highest_source_score": float(ctx.signals.get("highest_source_score", 0.0)),
+                                "coverage_ratio": float(ctx.signals.get("coverage_ratio", 0.0)),
+                            }
+                        },
+                    )
+                    ctx.update_ofr_residue(step=step, status="ok")
+                except Exception as exc:
+                    ctx.add_residue(step, "error", str(exc))
+                    ctx.emit_event("step_finished", step=step, status="error", message=str(exc))
+                    ctx.update_ofr_residue(step=step, status="error")
+                    raise
 
-            # Apply gear-shifting logic after each step
-            self._apply_gear_shift(ctx)
-            
-            # Early Termination Check 1: Exact title match (score 11.0 from direct lookup)
-            # If first result is an exact match, skip additional processing
-            if ctx.retrieved_data:
-                first_score = ctx.retrieved_data[0].get('score', 0)
-                if first_score >= 10.0 and len(ctx.retrieved_data) >= 1:
-                    ctx.log(f"✅ Early termination: Exact title match (score={first_score:.1f})")
+                # Context gap hook: escalate to retrieval tool-paths when local results are weak.
+                gap_route = detect_gap_routing(ctx, step)
+                if gap_route and gap_route.mode == "retrieval_tools":
+                    ctx.apply_routing(gap_route, step=f"router_gap:{step}")
+                    if "expand" not in ctx.current_plan:
+                        ctx.add_step("expand", priority="normal")
+                    if "targeted_search" not in ctx.current_plan:
+                        ctx.add_step("targeted_search", priority="normal")
+                    ctx.update_ofr_residue(step=f"router_gap:{step}", status="ok")
+
+                # Apply gear-shifting logic after each step
+                self._apply_gear_shift(ctx)
+
+                # Early Termination Check 1: Exact title match (score 11.0 from direct lookup)
+                # If first result is an exact match, skip additional processing
+                if ctx.retrieved_data:
+                    first_score = ctx.retrieved_data[0].get('score', 0)
+                    if first_score >= 10.0 and len(ctx.retrieved_data) >= 1:
+                        ctx.log(f"✅ Early termination: Exact title match (score={first_score:.1f})")
+                        break
+
+                # Early Termination Check 2: High quality results with good coverage
+                if (ctx.signals.get("highest_source_score", 0) >= config.HIGH_QUALITY_THRESHOLD
+                    and ctx.signals.get("coverage_ratio", 0) >= config.MIN_COVERAGE_THRESHOLD
+                    and len(ctx.retrieved_data) >= config.MIN_RESULTS_FOR_EARLY_EXIT):
+                    ctx.log(f"✅ Early termination: High quality results found ({ctx.signals['highest_source_score']:.1f} score, {ctx.signals['coverage_ratio']:.0%} coverage)")
                     break
 
-            # Early Termination Check 2: High quality results with good coverage
-            if (ctx.signals.get("highest_source_score", 0) >= config.HIGH_QUALITY_THRESHOLD
-                and ctx.signals.get("coverage_ratio", 0) >= config.MIN_COVERAGE_THRESHOLD
-                and len(ctx.retrieved_data) >= config.MIN_RESULTS_FOR_EARLY_EXIT):
-                ctx.log(f"✅ Early termination: High quality results found ({ctx.signals['highest_source_score']:.1f} score, {ctx.signals['coverage_ratio']:.0%} coverage)")
-                break
+                # Safety check with complexity-aware step limit
+                max_steps = getattr(ctx, 'complexity', None)
+                max_steps = max_steps.max_steps if max_steps else config.MAX_ORCHESTRATION_STEPS
+                if ctx.signals["step_counter"] >= max_steps:
+                    ctx.log(f"🛑 Safety limit reached ({max_steps} steps for {getattr(ctx.complexity, 'level', 'default')} query)")
+                    break
 
-            # Safety check with complexity-aware step limit
-            max_steps = getattr(ctx, 'complexity', None)
-            max_steps = max_steps.max_steps if max_steps else config.MAX_ORCHESTRATION_STEPS
-            if ctx.signals["step_counter"] >= max_steps:
-                ctx.log(f"🛑 Safety limit reached ({max_steps} steps for {getattr(ctx.complexity, 'level', 'default')} query)")
-                break
-        
-        # Log final state
-        ctx.log(f"✓ Orchestration complete. Retrieved {len(ctx.retrieved_data)} results")
+            # Log final state
+            ctx.log(f"✓ Orchestration complete. Retrieved {len(ctx.retrieved_data)} results")
+            return ctx.retrieved_data[:top_k]
+        finally:
+            # Expose compact observability surfaces for callers/UI diagnostics,
+            # including partial/error runs.
+            self.last_orchestration_status = ctx.orchestration_status_report()
+            self.last_orchestration_snapshot = ctx.residue_snapshot(limit=20)
 
-        # Expose compact observability surfaces for callers/UI diagnostics.
-        self.last_orchestration_status = ctx.orchestration_status_report()
-        self.last_orchestration_snapshot = ctx.residue_snapshot(limit=20)
-
-        if config.DEBUG:
-            debug_print("=== ORCHESTRATION LOG ===")
-            for log in ctx.logs:
-                debug_print(log)
-            debug_print(f"Final signals: {ctx.signals}")
-            debug_print(f"Orchestration status: {self.last_orchestration_status}")
-        
-        return ctx.retrieved_data[:top_k]
+            if config.DEBUG:
+                debug_print("=== ORCHESTRATION LOG ===")
+                for log in ctx.logs:
+                    debug_print(log)
+                debug_print(f"Final signals: {ctx.signals}")
+                debug_print(f"Orchestration status: {self.last_orchestration_status}")
 
     def _retrieve_without_orchestration(self, query: str, top_k: int = 10) -> List[Dict]:
         """Call ``retrieve`` with orchestration temporarily disabled.
@@ -187,6 +188,32 @@ class OrchestrationModule:
 
         handler(ctx)
         return True
+
+    def _result_identity(self, result: Dict[str, Any]) -> str:
+        """Build a stable dedup identity for retrieved items."""
+        metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
+        title = str(metadata.get("title", "")).strip().lower()
+        source = str(metadata.get("source", "")).strip().lower()
+        chunk = str(metadata.get("chunk_id", "")).strip().lower()
+
+        if title:
+            return f"{source}|{title}|{chunk}"
+        return repr(result)
+
+    def _merge_unique_results(self, ctx: HermitContext, results: List[Dict[str, Any]]) -> int:
+        """Merge retrieval results into context while preventing duplicate records."""
+        existing = {self._result_identity(r) for r in ctx.retrieved_data}
+        added = 0
+
+        for result in results:
+            identity = self._result_identity(result)
+            if identity in existing:
+                continue
+            ctx.retrieved_data.append(result)
+            existing.add(identity)
+            added += 1
+
+        return added
 
     def _orchestrate_extract(self, ctx) -> None:
         """Extract entities from query andupdate ambiguity score."""
@@ -263,13 +290,20 @@ class OrchestrationModule:
                         payload={"result_count": len(results), "resolved_entity": resolved_entity},
                     )
                     if results:
-                        ctx.retrieved_data.extend(results)
-                        ctx.log(f"  Retrieved {len(results)} articles for '{term}'")
+                        added = self._merge_unique_results(ctx, results)
+                        ctx.log(f"  Retrieved {len(results)} articles for '{term}' ({added} unique)")
                         break
             else:
                 ctx.log("  No indirect references detected")
                 
         except Exception as e:
+            ctx.record_excursion(
+                step="resolve",
+                mode="retrieval_tool",
+                query=ctx.original_query,
+                status="error",
+                note=f"multi-hop resolution failed: {e}",
+            )
             ctx.log(f"  ⚠ Multi-hop resolution failed: {e}")
 
     def _orchestrate_search(self, ctx) -> None:
@@ -286,16 +320,17 @@ class OrchestrationModule:
                 payload={"result_count": len(results)},
             )
 
-            # Merge new results with existing (avoid duplicates)
-            existing_titles = {r.get('metadata', {}).get('title') for r in ctx.retrieved_data}
-            for result in results:
-                title = result.get('metadata', {}).get('title')
-                if title not in existing_titles:
-                    ctx.retrieved_data.append(result)
-                    
-            ctx.log(f"  Retrieved {len(results)} articles")
+            added = self._merge_unique_results(ctx, results)
+            ctx.log(f"  Retrieved {len(results)} articles ({added} unique)")
             
         except Exception as e:
+            ctx.record_excursion(
+                step="search",
+                mode="local_retrieval",
+                query=ctx.original_query,
+                status="error",
+                note=f"primary retrieval failed: {e}",
+            )
             ctx.log(f"  ⚠ Search failed: {e}")
 
     def _orchestrate_score(self, ctx) -> None:
@@ -397,22 +432,34 @@ class OrchestrationModule:
             
             if expansions:
                 # Search for each expansion
+                total_added = 0
                 for term in expansions[:3]:  # Limit to 3 expansions
                     results = self._retrieve_without_orchestration(term, top_k=3)
-                    ctx.retrieved_data.extend(results)
+                    added = self._merge_unique_results(ctx, results)
+                    total_added += added
                     ctx.record_excursion(
                         step="expand",
                         mode="retrieval_tool",
                         query=term,
                         status="ok",
                         note="query expansion attempt",
-                        payload={"result_count": len(results)},
+                        payload={"result_count": len(results), "unique_added": added},
                     )
-                ctx.log(f"  Expanded search with {len(expansions[:3])} alternative queries")
+                ctx.log(
+                    f"  Expanded search with {len(expansions[:3])} alternative queries "
+                    f"({total_added} unique additions)"
+                )
             else:
                 ctx.log("  No expansions generated")
                 
         except Exception as e:
+            ctx.record_excursion(
+                step="expand",
+                mode="retrieval_tool",
+                query=ctx.original_query,
+                status="error",
+                note=f"query expansion failed: {e}",
+            )
             ctx.log(f"  ⚠ Query expansion failed: {e}")
 
     def _orchestrate_targeted(self, ctx) -> None:
@@ -428,20 +475,37 @@ class OrchestrationModule:
             # Use suggested searches if available, otherwise use entity names
             search_terms = suggested[:5] if suggested else missing[:3]
 
+            total_added = 0
             for term in search_terms:
                 results = self._retrieve_without_orchestration(term, top_k=2)
-                ctx.retrieved_data.extend(results)
+                added = self._merge_unique_results(ctx, results)
+                total_added += added
                 ctx.record_excursion(
                     step="targeted_search",
                     mode="retrieval_tool",
                     query=term,
                     status="ok",
                     note="coverage gap targeted lookup",
-                    payload={"result_count": len(results), "missing_count": len(missing)},
+                    payload={
+                        "result_count": len(results),
+                        "unique_added": added,
+                        "missing_count": len(missing),
+                    },
                 )
-            ctx.log(f"  Targeted search for {len(search_terms)} missing entities")
+            ctx.log(
+                f"  Targeted search for {len(search_terms)} missing entities "
+                f"({total_added} unique additions)"
+            )
             
         except Exception as e:
+            ctx.record_excursion(
+                step="targeted_search",
+                mode="retrieval_tool",
+                query=ctx.original_query,
+                status="error",
+                note=f"targeted search failed: {e}",
+                payload={"missing_count": len(missing)},
+            )
             ctx.log(f"  ⚠ Targeted search failed: {e}")
 
     def _apply_gear_shift(self, ctx) -> None:

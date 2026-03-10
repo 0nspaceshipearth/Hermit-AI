@@ -102,6 +102,36 @@ class TestOrchestrationStatusSurfaces(unittest.TestCase):
         )
 
 
+class _DedupExpansionOrchestrator(OrchestrationModule):
+    def __init__(self):
+        self.use_joints = True
+        self.entity_joint = type("_Entity", (), {"suggest_expansion": lambda *_: ["alpha", "beta"]})()
+
+    def retrieve(self, query, top_k=10):
+        if query == "seed":
+            return []
+        return [
+            {"metadata": {"title": "Python"}, "score": 1.0},
+            {"metadata": {"title": "Python"}, "score": 1.0},
+        ]
+
+
+class TestOrchestratorResultDedup(unittest.TestCase):
+    def test_expand_merges_duplicate_titles_once(self):
+        dummy = _DedupExpansionOrchestrator()
+
+        results = dummy.retrieve_with_orchestration("seed", top_k=5)
+
+        titles = [r.get("metadata", {}).get("title") for r in results]
+        self.assertEqual(titles, ["Python"])
+
+        expand_artifacts = [
+            a for a in dummy.last_orchestration_snapshot.get("artifacts", []) if a.get("step") == "expand"
+        ]
+        self.assertTrue(expand_artifacts)
+        self.assertTrue(any(a.get("payload", {}).get("unique_added") == 1 for a in expand_artifacts))
+
+
 class TestOrchestratorStepDispatch(unittest.TestCase):
     def test_dispatch_known_step_invokes_handler(self):
         dummy = _DispatchProbeOrchestrator()
@@ -120,6 +150,35 @@ class TestOrchestratorStepDispatch(unittest.TestCase):
 
         self.assertFalse(handled)
         self.assertTrue(any(r.step == "not_a_real_step" and r.status == "skipped" for r in ctx.residue))
+
+
+class _ExplodingStepOrchestrator(OrchestrationModule):
+    def __init__(self):
+        self.use_joints = False
+
+    def _orchestrate_extract(self, _ctx):
+        return None
+
+    def _orchestrate_search(self, _ctx):
+        raise RuntimeError("boom")
+
+
+class TestOrchestrationErrorStatusSurfaces(unittest.TestCase):
+    def test_error_path_still_publishes_snapshot_contract(self):
+        dummy = _ExplodingStepOrchestrator()
+
+        with self.assertRaises(RuntimeError):
+            dummy.retrieve_with_orchestration("trigger", top_k=3)
+
+        self.assertIsInstance(dummy.last_orchestration_status, dict)
+        self.assertIsInstance(dummy.last_orchestration_snapshot, dict)
+        self.assertIn("contract", dummy.last_orchestration_snapshot)
+        self.assertTrue(
+            any(
+                r.get("step") == "search" and r.get("status") == "error"
+                for r in dummy.last_orchestration_snapshot.get("residue", [])
+            )
+        )
 
 
 if __name__ == "__main__":
