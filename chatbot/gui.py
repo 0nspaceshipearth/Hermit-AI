@@ -2522,7 +2522,7 @@ class ChatbotGUI:
         suggestions: List[str] = []
         text_lower = text.lower()
         
-        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/cloud", "/forge", "/mode"]
+        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/cloud", "/turbo", "/forge", "/mode"]
         
         if text.startswith("/"):
             for cmd in commands:
@@ -3011,8 +3011,31 @@ class ChatbotGUI:
             pass
         return None
     
+    def _enable_turbo_mode(self) -> bool:
+        key = (getattr(config, "API_KEY", "") or "").strip()
+        if not key:
+            self.append_message("system", "Turbo needs cloud auth first. Run /cloud and sign in.")
+            return False
+
+        config.API_MODE = True
+        if not getattr(config, "API_MODEL_NAME", ""):
+            config.API_MODEL_NAME = getattr(config, "CODEX_CLOUD_DEFAULT_MODEL", "gpt-5.3-codex")
+        self.model = config.API_MODEL_NAME
+        self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+
+        self.history.clear()
+        self.query_history.clear()
+        clear_runtime_memory(reset_rag=False)
+        ModelManager.close_all()
+
+        self.append_message("system", f"Turbo enabled. Provider/API mode active on model: {self.model}")
+        self.update_status(f"Turbo: {self.model}")
+        return True
+
     def _set_runtime_mode(self, mode: str) -> bool:
         mode_norm = (mode or "").strip().lower()
+        if mode_norm == "turbo":
+            return self._enable_turbo_mode()
         if mode_norm not in {"classic", "wave"}:
             return False
         previous = getattr(config, "RUNTIME_MODE", "classic")
@@ -3065,6 +3088,7 @@ class ChatbotGUI:
   /status            Show system status
   /api               Configure external API mode
   /cloud             Open Codex/OpenAI cloud auth menu
+  /turbo             Quick-switch to cloud/API provider mode
   /forge             Build a ZIM from local docs
   /mode              Show or change runtime architecture
 
@@ -3079,6 +3103,7 @@ RUNTIME ARCHITECTURE:
   /mode           Show current runtime mode
   /mode classic   Stable tiered loading/unloading behavior
   /mode wave      Keep model tiers hot and reset runtime state between passes
+  /mode turbo     Shortcut: switch to cloud/API provider mode
 
 Mouse Features:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3214,6 +3239,9 @@ Keyboard Shortcuts:
         if user_input.lower() == "/model":
             self._enter_model_mode()
             return
+        if user_input.lower() == "/turbo":
+            self._enable_turbo_mode()
+            return
         if user_input.lower().startswith("/mode"):
             parts = user_input.split(maxsplit=1)
             if len(parts) == 1:
@@ -3221,7 +3249,7 @@ Keyboard Shortcuts:
             else:
                 mode_name = parts[1].strip().lower()
                 if not self._set_runtime_mode(mode_name):
-                    self.append_message("system", "Usage: /mode classic | /mode wave")
+                    self.append_message("system", "Usage: /mode classic | /mode wave | /mode turbo")
             return
         if user_input.lower() == "/tree":
             self.show_system_tree()
