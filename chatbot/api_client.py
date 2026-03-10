@@ -139,6 +139,7 @@ class OpenAIClientWrapper:
             "model": self.model_name,
             "instructions": instructions,
             "input": user_input,
+            "store": False,
             "stream": stream,
             "temperature": temperature,
             "top_p": top_p,
