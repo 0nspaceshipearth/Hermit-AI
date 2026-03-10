@@ -28,9 +28,19 @@ import libzim
 
 from chatbot.rag import RAGSystem, TextProcessor
 from chatbot import config
-from chatbot.chat import build_messages, stream_chat, clear_runtime_memory, load_runtime_checkpoint
+from chatbot.chat import build_messages, build_messages_with_intent, stream_chat, clear_runtime_memory, load_runtime_checkpoint
 from chatbot.model_manager import ModelManager
 from chatbot.models import Message
+from chatbot.teleport import (
+    execute_teleport_contract,
+    execute_shell_command,
+    execute_file_write,
+    TeleportEnvelope,
+    TeleportResult,
+    wave_mode_enabled,
+    detect_command,
+    detect_target_path,
+)
 
 
 class ChatbotCLI(cmd.Cmd):
@@ -479,8 +489,142 @@ class ChatbotCLI(cmd.Cmd):
         """Exit the CLI."""
         return self.do_quit(arg)
 
+    def _execute_teleport(self, envelope):
+        """Execute a teleport envelope and return the formatted result string."""
+        intent = envelope.intent
+        workspace = str(self.cwd)
+        envelope.constraints["workspace"] = workspace
+
+        if intent == "shell_command":
+            # If no command was auto-detected, try extracting from objective
+            if not envelope.constraints.get("command"):
+                cmd_guess = detect_command(envelope.objective)
+                if cmd_guess:
+                    envelope.constraints["command"] = cmd_guess
+                else:
+                    # The objective itself might be the command
+                    envelope.constraints["command"] = envelope.objective
+            result = execute_teleport_contract(envelope)
+        elif intent in ("file_write", "script_create"):
+            # For file writes, we need the LLM to generate the content first
+            # Return None to signal "needs content generation"
+            return None
+        else:
+            result = execute_teleport_contract(envelope)
+
+        if result.ok:
+            output = result.message or "(no output)"
+            artifact = result.artifact or {}
+            return f"✅ Command executed successfully (exit={artifact.get('exit_code', 0)})\n{output}"
+        else:
+            return f"❌ Execution failed: {result.status} — {result.message}"
+
+    def _agentic_generate(self, messages):
+        """Run LLM generation and return the full response text."""
+        full_response = ""
+        for chunk in stream_chat(self.model_name, messages):
+            print(chunk, end="", flush=True)
+            full_response += chunk
+        return full_response
+
+    def _extract_agent_command(self, response):
+        """Extract a [HERMIT_CMD]...[/HERMIT_CMD] block from LLM output.
+
+        Returns the command string if found, else None.
+        """
+        import re
+        match = re.search(r'\[HERMIT_CMD\](.+?)\[/HERMIT_CMD\]', response, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _extract_file_content(self, response, language: str = None):
+        """Extract file content from LLM output.
+
+        Looks for:
+        1. Content in code fences (```lang ... ```)
+        2. Content in [HERMIT_FILE]...[/HERMIT_FILE] tags
+        3. The entire response if no markers found
+
+        Returns:
+            (content, found_marker) - extracted content and whether a marker was found
+        """
+        import re
+
+        # Try [HERMIT_FILE] tags first (explicit marker)
+        file_match = re.search(r'\[HERMIT_FILE\](.+?)\[/HERMIT_FILE\]', response, re.DOTALL)
+        if file_match:
+            return file_match.group(1).strip(), True
+
+        # Try code fences with language hint
+        fence_pattern = r'```(?:' + (re.escape(language) if language else r'\w*') + r')?\s*\n(.+?)\n```'
+        fence_match = re.search(fence_pattern, response, re.DOTALL)
+        if fence_match:
+            return fence_match.group(1).strip(), True
+
+        # Try any code fence
+        any_fence = re.search(r'```\w*\n(.+?)\n```', response, re.DOTALL)
+        if any_fence:
+            return any_fence.group(1).strip(), True
+
+        # No markers - return the full response (minus any leading/trailing commentary)
+        # But only if it looks like code content
+        lines = response.strip().split('\n')
+        if len(lines) > 1 or any(c in response for c in '{}[]()=;:'):
+            return response.strip(), False
+
+        return None, False
+
+    def _execute_file_write_from_response(self, envelope, response):
+        """Execute a file write using LLM-generated content.
+
+        Args:
+            envelope: The teleport envelope with target_path constraint
+            response: The LLM's response containing the file content
+
+        Returns:
+            Formatted result string or None if no content found
+        """
+        language = envelope.constraints.get("language", "")
+        content, found_marker = self._extract_file_content(response, language)
+
+        if not content:
+            return None
+
+        # Ensure we have a target path
+        target_path = envelope.constraints.get("target_path")
+        if not target_path:
+            # Generate a default filename
+            import os
+            ext_map = {
+                "python": ".py",
+                "javascript": ".js",
+                "bash": ".sh",
+                "html": ".html",
+                "css": ".css",
+                "json": ".json",
+                "markdown": ".md",
+            }
+            ext = ext_map.get(language, ".txt")
+            target_path = os.path.join(str(self.cwd), f"generated_file{ext}")
+            envelope.constraints["target_path"] = target_path
+
+        # Execute the write
+        result = execute_file_write(envelope, content)
+
+        if result.ok:
+            artifact = result.artifact or {}
+            return (
+                f"✅ File written successfully\n"
+                f"Path: {artifact.get('path', target_path)}\n"
+                f"Size: {artifact.get('size', len(content))} chars\n"
+                f"Type: {artifact.get('kind', 'file')}"
+            )
+        else:
+            return f"❌ File write failed: {result.status} — {result.message}"
+
     def default(self, line):
-        """Handle chat interactions."""
+        """Handle chat interactions — with agentic teleport in wave mode."""
         if not line:
             return
 
@@ -491,14 +635,131 @@ class ChatbotCLI(cmd.Cmd):
 
         print(f"\nThinking...")
         try:
-            messages = build_messages(config.SYSTEM_PROMPT, self.history)
+            messages, intent = build_messages_with_intent(config.SYSTEM_PROMPT, self.history)
 
+            # === AGENTIC TELEPORT PATH (wave mode) ===
+            if (
+                wave_mode_enabled()
+                and intent.shell_intent
+                and intent.teleport_envelope
+                and not intent.teleport_envelope.constraints.get("refused")
+            ):
+                envelope = intent.teleport_envelope
+                teleport_result = self._execute_teleport(envelope)
+
+                if teleport_result is not None:
+                    # We executed a command — feed the real output back to the LLM
+                    print(f"\n📡 Teleport [{envelope.intent}]\n")
+                    print(teleport_result)
+
+                    # Inject the excursion result as context for LLM synthesis
+                    observation_msg = (
+                        f"[SHELL CHAMBER OBSERVATION]\n"
+                        f"Intent: {envelope.intent}\n"
+                        f"Command: {envelope.constraints.get('command', envelope.objective)}\n"
+                        f"Working directory: {self.cwd}\n"
+                        f"Result:\n{teleport_result}\n"
+                        f"[/SHELL CHAMBER OBSERVATION]\n\n"
+                        f"Summarize the result for the user. If you need to run another command, "
+                        f"output it inside [HERMIT_CMD]command here[/HERMIT_CMD] tags."
+                    )
+                    self.history.append(Message(role="assistant", content=f"[Executed: {envelope.constraints.get('command', '')}]"))
+                    self.history.append(Message(role="user", content=observation_msg))
+                    messages = build_messages(config.SYSTEM_PROMPT, self.history)
+
+                    print(f"\nHermit: ", end="", flush=True)
+                    full_response = self._agentic_generate(messages)
+                    print("\n")
+
+                    # Agent loop: LLM can request follow-up commands (max 5 rounds)
+                    for _round in range(5):
+                        follow_up_cmd = self._extract_agent_command(full_response)
+                        if not follow_up_cmd:
+                            break
+
+                        print(f"\n📡 Follow-up command: {follow_up_cmd}")
+                        follow_envelope = TeleportEnvelope(
+                            contract_version="teleport.v1",
+                            intent="shell_command",
+                            source_mode="wave",
+                            target_mode="chamber",
+                            objective=follow_up_cmd,
+                            constraints={
+                                "workspace": str(self.cwd),
+                                "command": follow_up_cmd,
+                                "requires_confirmation": False,
+                                "allow_prose_fallback": False,
+                            },
+                        )
+                        follow_result = self._execute_teleport(follow_envelope)
+                        if follow_result is None:
+                            break
+
+                        print(follow_result)
+                        observation = (
+                            f"[SHELL CHAMBER OBSERVATION]\n"
+                            f"Follow-up command: {follow_up_cmd}\n"
+                            f"Result:\n{follow_result}\n"
+                            f"[/SHELL CHAMBER OBSERVATION]\n\n"
+                            f"Continue summarizing. If you need another command, use [HERMIT_CMD]...[/HERMIT_CMD]."
+                        )
+                        self.history.append(Message(role="assistant", content=full_response))
+                        self.history.append(Message(role="user", content=observation))
+                        messages = build_messages(config.SYSTEM_PROMPT, self.history)
+
+                        print(f"\nHermit: ", end="", flush=True)
+                        full_response = self._agentic_generate(messages)
+                        print("\n")
+
+                    self.history.append(Message(role="assistant", content=full_response))
+                    return
+
+                # teleport_result is None → file_write/script_create needs LLM-generated content
+                # Fall through to normal generation, the system prompt already has instructions
+
+            # === NORMAL CHAT PATH ===
             print(f"Hermit: ", end="", flush=True)
             full_response = ""
             for chunk in stream_chat(self.model_name, messages):
                 print(chunk, end="", flush=True)
                 full_response += chunk
             print("\n")
+
+            # In wave mode, check if the LLM output contains a command to execute
+            if wave_mode_enabled():
+                agent_cmd = self._extract_agent_command(full_response)
+                if agent_cmd:
+                    print(f"\n📡 Agent command: {agent_cmd}")
+                    auto_envelope = TeleportEnvelope(
+                        contract_version="teleport.v1",
+                        intent="shell_command",
+                        source_mode="wave",
+                        target_mode="chamber",
+                        objective=agent_cmd,
+                        constraints={
+                            "workspace": str(self.cwd),
+                            "command": agent_cmd,
+                            "requires_confirmation": False,
+                            "allow_prose_fallback": False,
+                        },
+                    )
+                    cmd_result = self._execute_teleport(auto_envelope)
+                    if cmd_result:
+                        print(cmd_result)
+                        self.history.append(Message(role="assistant", content=full_response))
+                        self.history.append(Message(role="user", content=f"[SHELL CHAMBER OBSERVATION]\n{cmd_result}\n[/SHELL CHAMBER OBSERVATION]"))
+                        return
+
+                # If this was a file_write intent with an envelope, execute the write now
+                if intent.shell_intent in ("file_write", "script_create") and intent.teleport_envelope:
+                    write_result = self._execute_file_write_from_response(intent.teleport_envelope, full_response)
+                    if write_result:
+                        print(f"\n📡 Teleport [{intent.shell_intent}]")
+                        print(write_result)
+                        # Add a summary to history
+                        summary = f"{full_response}\n\n[System: {write_result}]"
+                        self.history.append(Message(role="assistant", content=summary))
+                        return
 
             self.history.append(Message(role="assistant", content=full_response))
 

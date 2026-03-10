@@ -813,3 +813,21 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
     debug_print("="*60)
     print(f"\nGenerating response...")
     return messages
+
+
+def build_messages_with_intent(system_prompt: str, history: List[Message], user_query: str = None):
+    """Build messages and also return the IntentResult for teleport handling.
+
+    Returns:
+        (messages, intent) — the constructed message list and the raw IntentResult
+        so callers can inspect shell_intent / teleport_envelope before generating.
+    """
+    from chatbot.intent import detect_intent
+
+    query_text = user_query
+    if not query_text and history and history[-1].role == 'user':
+        query_text = history[-1].content
+
+    intent = detect_intent(query_text or "")
+    messages = build_messages(system_prompt, history, user_query)
+    return messages, intent

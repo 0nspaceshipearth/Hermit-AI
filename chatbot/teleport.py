@@ -139,16 +139,18 @@ SHELL_COMMAND_PATTERNS = [
     r'\b(run|execute|launch|start)\s+(a|the|this)?\s*(command|script|program)\b',
     r'\b(run|execute)\s+.*\.(py|sh|js)\b',
     r'\bshell\s+(command|execute|run)\b',
-    r'\bterminal\s+',
+    r'\bterminal\s+(command|session|window)\b',
     r'\b(what\'?s|what is)\s+(the\s+)?(output|result)\s+of\b',
     r'\blist\s+(files|directory|dir|the\s+contents)\b',
     r'\bshow\s+me\s+(the\s+)?(files|contents|directory)\b',
-    r'\bin\s+(the\s+)?(terminal|shell)\b',
     r'\bcommand\s+line\b',
     # Direct command patterns
     r'\brun\s+`[^`]+`',
     r'\bexecute\s+`[^`]+`',
-    r'\b(running|executing)\s+',
+    # Bare "run <word>" for short commands like "run ls", "run pytest"
+    r'\b(run|execute)\s+[a-z][\w\-]*\b',
+    # "run it" / "execute it" for follow-up commands
+    r'\b(run|execute)\s+(it|this|that)\b',
 ]
 
 SCRIPT_PATTERNS = [
@@ -179,6 +181,24 @@ def classify_shell_intent(user_input: str) -> ShellIntent:
     
     if not text:
         return ShellIntent.UNKNOWN
+    
+    # Question guard: if the query is phrased as a question, it's almost certainly
+    # NOT a shell command unless it contains explicit command keywords.
+    # This prevents "what OS am i running" from being classified as shell_command.
+    question_starts = (
+        "what ", "who ", "why ", "how ", "when ", "where ",
+        "is ", "are ", "can ", "does ", "could ", "would ",
+        "should ", "do ", "did ", "has ", "have ", "will ",
+        "what's ", "who's ", "how's ", "where's ", "when's ",
+    )
+    explicit_command_keywords = (
+        "run ", "execute ", "launch ", "start ",
+        "list files", "list directory", "list dir", "list the contents",
+        "show me the files", "show me the contents", "show me the directory",
+    )
+    if low.startswith(question_starts):
+        if not any(kw in low for kw in explicit_command_keywords):
+            return ShellIntent.UNKNOWN
     
     # Check for file write patterns
     for pattern in FILE_WRITE_PATTERNS:
@@ -278,19 +298,26 @@ def detect_language(user_input: str) -> str:
 def detect_command(user_input: str) -> Optional[str]:
     """Extract a shell command from user input."""
     text = (user_input or "").strip()
-    
-    # Pattern: "run X" / "execute X" / "command: X"
+
+    if not text:
+        return None
+
+    # Prefer more specific forms first so we do not capture filler like "the command".
     patterns = [
-        r'(?:run|execute|launch)\s+["\']?([^"\']+)["\']?',
+        r'(?:run|execute|launch|start)\s+(?:the\s+|a\s+)?command\s+(.+)$',
+        r'(?:run|execute|launch|start)\s+(?:the\s+|a\s+)?script\s+(.+)$',
         r'command:\s*["\']?([^"\']+)["\']?',
         r'\$\s*(.+)$',
+        r'(?:run|execute|launch|start)\s+["\']?([^"\']+)["\']?$',
     ]
-    
+
     for pattern in patterns:
         m = re.search(pattern, text, flags=re.IGNORECASE)
         if m:
-            return m.group(1).strip()
-    
+            command = m.group(1).strip()
+            command = re.sub(r'^(?:the\s+|a\s+)', '', command, flags=re.IGNORECASE)
+            return command.strip()
+
     return None
 
 
@@ -304,7 +331,12 @@ def build_shell_envelope(user_input: str, workspace: str = None) -> Optional[Tel
     This is the main entry point for detecting and building shell teleport contracts.
     Returns None if no shell intent is detected.
     """
-    # First check wave mode
+    intent = classify_shell_intent(user_input)
+
+    if intent == ShellIntent.UNKNOWN:
+        return None
+
+    # Only gate on wave mode after we know the query actually needs teleport.
     is_wave, wave_msg = require_wave_mode()
     if not is_wave:
         # Return a special envelope that indicates refusal
@@ -318,11 +350,6 @@ def build_shell_envelope(user_input: str, workspace: str = None) -> Optional[Tel
             policy_reason="Teleport refused: wave mode not enabled",
             fallback_reason=wave_msg,
         )
-    
-    intent = classify_shell_intent(user_input)
-    
-    if intent == ShellIntent.UNKNOWN:
-        return None
     
     workspace = workspace or getattr(config, 'CLI_WORKSPACE_ROOT', os.getcwd())
     target_path = detect_target_path(user_input, workspace)

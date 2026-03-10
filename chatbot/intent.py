@@ -255,42 +255,52 @@ def detect_intent(query: str) -> IntentResult:
         debug_print(f"Decision: should_retrieve=False (shell mode - will teleport)")
         
         # Determine instruction based on intent type
+        agent_protocol = (
+            "\nAGENT PROTOCOL:\n"
+            "- Your shell commands are being executed LIVE in a real terminal.\n"
+            "- You will receive [SHELL CHAMBER OBSERVATION] blocks with real command output.\n"
+            "- To run a follow-up command, output it inside [HERMIT_CMD]command[/HERMIT_CMD] tags.\n"
+            "- You can chain multiple commands across rounds (max 5).\n"
+            "- Summarize results in plain language for the user.\n"
+            "- Do NOT simulate or fake output. Real execution is happening.\n"
+        )
         if shell_intent == "file_write":
             mode_instruction = (
                 "\nMODE: SHELL TELEPORT - FILE WRITE\n"
                 "OBJECTIVE: Write a file via the Shell Chamber.\n"
                 "INSTRUCTIONS:\n"
-                "1. You will be teleported to a shell chamber to write the file.\n"
-                "2. Generate the appropriate file content based on the user's request.\n"
-                "3. The file will be written to the target path safely.\n"
-                "4. Do NOT output the file content as text - it will be written directly.\n"
-                "5. After teleport, confirm the operation completed successfully."
+                "1. Generate the file content the user requested.\n"
+                "2. The Shell Chamber will write it to disk.\n"
+                "3. Confirm the operation completed successfully.\n"
+                + agent_protocol
             )
         elif shell_intent == "shell_command":
             mode_instruction = (
                 "\nMODE: SHELL TELEPORT - COMMAND\n"
                 "OBJECTIVE: Execute a shell command via the Shell Chamber.\n"
                 "INSTRUCTIONS:\n"
-                "1. You will be teleported to a shell chamber to execute the command.\n"
-                "2. The command will run in a bounded workspace with timeout limits.\n"
-                "3. Report the results back to the user clearly.\n"
-                "4. Do NOT simulate output - execute the real command."
+                "1. The command will execute in a real terminal with timeout limits.\n"
+                "2. You will see the real output in a [SHELL CHAMBER OBSERVATION] block.\n"
+                "3. Summarize the results clearly for the user.\n"
+                "4. If you need follow-up commands, use [HERMIT_CMD]command[/HERMIT_CMD].\n"
+                + agent_protocol
             )
         elif shell_intent == "script_create":
             mode_instruction = (
                 "\nMODE: SHELL TELEPORT - SCRIPT CREATE\n"
                 "OBJECTIVE: Create an executable script via the Shell Chamber.\n"
                 "INSTRUCTIONS:\n"
-                "1. You will be teleported to a shell chamber to create the script.\n"
-                "2. Generate appropriate script content with proper scaffolding.\n"
-                "3. The script will be saved with executable permissions.\n"
-                "4. After teleport, confirm creation and provide usage instructions."
+                "1. Generate appropriate script content with proper scaffolding.\n"
+                "2. The script will be saved with executable permissions.\n"
+                "3. After creation, confirm and provide usage instructions.\n"
+                + agent_protocol
             )
         else:
             mode_instruction = (
                 "\nMODE: SHELL TELEPORT\n"
                 "OBJECTIVE: Execute a shell operation via the Shell Chamber.\n"
                 "The chamber provides safe execution with proper boundaries.\n"
+                + agent_protocol
             )
         
         return IntentResult(
