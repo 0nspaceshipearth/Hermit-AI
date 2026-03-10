@@ -2522,7 +2522,7 @@ class ChatbotGUI:
         suggestions: List[str] = []
         text_lower = text.lower()
         
-        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/cloud", "/turbo", "/forge", "/mode"]
+        commands = ["/help", "/exit", "/clear", "/themes", "/model", "/tree", "/status", "/api", "/cloud", "/turbo", "/local", "/forge", "/mode"]
         
         if text.startswith("/"):
             for cmd in commands:
@@ -3032,10 +3032,27 @@ class ChatbotGUI:
         self.update_status(f"Turbo: {self.model}")
         return True
 
+    def _enable_local_mode(self) -> bool:
+        config.API_MODE = False
+        # Keep chosen runtime architecture; just flip provider back to local.
+        self.model = getattr(config, "DEFAULT_MODEL", self.model)
+        self.root.title(f"Chatbot ({'Link Mode' if self.link_mode else 'Response Mode'})")
+
+        self.history.clear()
+        self.query_history.clear()
+        clear_runtime_memory(reset_rag=False)
+        ModelManager.close_all()
+
+        self.append_message("system", f"Local mode enabled. Using local model: {self.model}")
+        self.update_status(f"Local: {self.model}")
+        return True
+
     def _set_runtime_mode(self, mode: str) -> bool:
         mode_norm = (mode or "").strip().lower()
         if mode_norm == "turbo":
             return self._enable_turbo_mode()
+        if mode_norm == "local":
+            return self._enable_local_mode()
         if mode_norm not in {"classic", "wave"}:
             return False
         previous = getattr(config, "RUNTIME_MODE", "classic")
@@ -3089,6 +3106,7 @@ class ChatbotGUI:
   /api               Configure external API mode
   /cloud             Open Codex/OpenAI cloud auth menu
   /turbo             Quick-switch to cloud/API provider mode
+  /local             Switch back to local/on-device provider mode
   /forge             Build a ZIM from local docs
   /mode              Show or change runtime architecture
 
@@ -3104,6 +3122,7 @@ RUNTIME ARCHITECTURE:
   /mode classic   Stable tiered loading/unloading behavior
   /mode wave      Keep model tiers hot and reset runtime state between passes
   /mode turbo     Shortcut: switch to cloud/API provider mode
+  /mode local     Shortcut: switch back to local/on-device provider mode
 
 Mouse Features:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3242,6 +3261,9 @@ Keyboard Shortcuts:
         if user_input.lower() == "/turbo":
             self._enable_turbo_mode()
             return
+        if user_input.lower() == "/local":
+            self._enable_local_mode()
+            return
         if user_input.lower().startswith("/mode"):
             parts = user_input.split(maxsplit=1)
             if len(parts) == 1:
@@ -3249,7 +3271,7 @@ Keyboard Shortcuts:
             else:
                 mode_name = parts[1].strip().lower()
                 if not self._set_runtime_mode(mode_name):
-                    self.append_message("system", "Usage: /mode classic | /mode wave | /mode turbo")
+                    self.append_message("system", "Usage: /mode classic | /mode wave | /mode turbo | /mode local")
             return
         if user_input.lower() == "/tree":
             self.show_system_tree()
