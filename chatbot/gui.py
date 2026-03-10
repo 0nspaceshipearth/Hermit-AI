@@ -28,6 +28,7 @@ import select
 import subprocess
 import threading
 import time
+import webbrowser
 from typing import List, Tuple, Optional
 from urllib.request import Request, urlopen
 
@@ -1339,81 +1340,104 @@ class ChatbotGUI:
         )
         self._render_terminal_menu(text)
 
-    def _run_codex_auth_with_pty(self, login_command: str):
-        """Run OpenClaw Codex login in a PTY so it gets an interactive TTY without spawning another terminal window."""
+    def _run_codex_auth_in_app(self):
+        """Run OpenAI Codex OAuth directly via OpenClaw's bundled pi-ai OAuth implementation."""
+        node_script = r'''
+(async()=>{
+  try {
+    const mod = await import('/home/dekko/.npm-global/lib/node_modules/openclaw/node_modules/@mariozechner/pi-ai/dist/utils/oauth/openai-codex.js');
+    const loginOpenAICodex = mod.loginOpenAICodex;
+    const creds = await loginOpenAICodex({
+      onAuth: (info)=>{ console.log('AUTH_URL:' + (info?.url || '')); },
+      onPrompt: async (prompt)=>{
+        console.log('PROMPT:' + (prompt?.message || 'Paste code'));
+        return '';
+      },
+      onProgress: (m)=>{ if (m) console.log('PROGRESS:' + m); },
+    });
+    console.log('OAUTH_OK:' + JSON.stringify(creds));
+    process.exit(0);
+  } catch(e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    console.error('OAUTH_ERR:' + msg);
+    process.exit(1);
+  }
+})();
+'''
         try:
-            master_fd, slave_fd = pty.openpty()
             proc = subprocess.Popen(
-                login_command,
-                shell=True,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
+                ["node", "-e", node_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
                 cwd=os.path.expanduser("~"),
-                text=False,
-                close_fds=True,
             )
-            os.close(slave_fd)
 
-            captured = []
-            saw_browser_hint = False
-            start = time.time()
+            saw_auth_url = False
+            output_lines = []
+            started = time.time()
             while True:
-                if proc.poll() is not None:
-                    # Drain remaining output.
-                    while True:
-                        ready, _, _ = select.select([master_fd], [], [], 0)
-                        if master_fd not in ready:
-                            break
+                if proc.stdout is None:
+                    break
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    if time.time() - started > 240:
+                        proc.terminate()
+                        self._post_system("Codex auth timed out. Please try /cloud again.")
+                        return
+                    continue
+
+                text = line.strip()
+                output_lines.append(text)
+
+                if text.startswith("AUTH_URL:"):
+                    url = text[len("AUTH_URL:"):].strip()
+                    if url:
+                        saw_auth_url = True
                         try:
-                            chunk = os.read(master_fd, 4096)
-                        except OSError:
-                            break
-                        if not chunk:
-                            break
-                        text = chunk.decode(errors="ignore")
-                        captured.append(text)
-                    break
-
-                ready, _, _ = select.select([master_fd], [], [], 0.3)
-                if master_fd in ready:
+                            webbrowser.open(url)
+                        except Exception:
+                            pass
+                        self._post_system("Opened Codex login in your browser. Complete sign-in there.")
+                elif text.startswith("PROGRESS:"):
+                    msg = text[len("PROGRESS:"):].strip()
+                    if msg:
+                        self._post_system(msg)
+                elif text.startswith("PROMPT:"):
+                    # Keep message informative without exposing low-level prompt noise.
+                    self._post_system("Waiting for OAuth callback from browser...")
+                elif text.startswith("OAUTH_OK:"):
+                    payload = text[len("OAUTH_OK:"):].strip()
                     try:
-                        chunk = os.read(master_fd, 4096)
-                    except OSError:
-                        chunk = b""
-                    if chunk:
-                        text = chunk.decode(errors="ignore")
-                        captured.append(text)
-                        low = text.lower()
-                        if ("open this url" in low or "visit" in low or "browser" in low) and not saw_browser_hint:
-                            saw_browser_hint = True
-                            self._post_system("Codex auth is running. If prompted, complete the browser login and come back here.")
+                        creds = json.loads(payload)
+                    except Exception:
+                        creds = {}
+                    access = (creds or {}).get("access", "")
+                    if access:
+                        config.API_MODE = True
+                        config.API_BASE_URL = "https://api.openai.com/v1"
+                        config.API_KEY = access
+                        config.API_MODEL_NAME = getattr(config, "CODEX_CLOUD_DEFAULT_MODEL", "gpt-5.3-codex")
+                        from chatbot.model_manager import ModelManager
+                        ModelManager.close_all()
+                        self.model = config.API_MODEL_NAME
+                        self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
+                        self.update_status(f"API: {self.model}")
+                        self._post_system("Signed in with Codex OAuth. Hermit is now in Codex cloud mode.")
+                        return
+                    self._post_system("Codex auth returned no access token.")
+                    return
 
-                if time.time() - start > 180:
-                    proc.terminate()
-                    self._post_system("Codex auth timed out. Please run it manually in your terminal.")
-                    break
-
-            os.close(master_fd)
-            output = "".join(captured)
-            low = output.lower()
-
-            if proc.returncode == 0:
-                self._post_system("Codex auth completed. Hermit can now use Codex/OpenAI models.")
+            rc = proc.poll()
+            if rc == 0:
+                if not saw_auth_url:
+                    self._post_system("Codex auth completed.")
                 return
 
-            if "no provider plugins found" in low:
-                self._post_system("Codex auth is unavailable because no OpenClaw provider plugins were found on this machine.")
-                self._post_system("Run this once in your terminal to configure providers: openclaw configure")
-                return
-
-            if "requires an interactive tty" in low:
-                self._post_system("Codex auth still reports missing TTY in this environment.")
-                self._post_system("Run manually: openclaw models auth login --provider openai-codex")
-                return
-
-            tail = "\n".join([line for line in output.splitlines() if line.strip()][-8:])
-            self._post_system(f"Codex auth failed (exit {proc.returncode}).")
+            tail = "\n".join([l for l in output_lines if l][-8:])
+            self._post_system("Codex auth failed.")
             if tail:
                 self._post_system(tail)
         except Exception as e:
@@ -1425,9 +1449,8 @@ class ChatbotGUI:
             self.append_message("system", f"Unsupported cloud provider: {provider}")
             return
 
-        login_command = getattr(config, "CODEX_CLOUD_LOGIN_COMMAND", "openclaw models auth login --provider openai-codex")
-        self.append_message("system", "Starting Codex auth inside Hermit…")
-        threading.Thread(target=self._run_codex_auth_with_pty, args=(login_command,), daemon=True).start()
+        self.append_message("system", "Starting Codex sign-in inside Hermit…")
+        threading.Thread(target=self._run_codex_auth_in_app, daemon=True).start()
         self._close_command_mode()
 
     def _handle_cloud_input(self, user_input: str):
