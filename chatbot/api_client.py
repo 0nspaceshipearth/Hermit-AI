@@ -141,8 +141,6 @@ class OpenAIClientWrapper:
             "input": user_input,
             "store": False,
             "stream": stream,
-            "temperature": temperature,
-            "top_p": top_p,
         }
         if max_tokens:
             payload["max_output_tokens"] = max_tokens
