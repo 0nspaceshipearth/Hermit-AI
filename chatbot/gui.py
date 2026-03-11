@@ -48,7 +48,7 @@ from chatbot.config import DEFAULT_MODEL
 from chatbot.model_manager import set_download_callback, ModelManager
 from chatbot.preferences import load_theme_name, save_theme_name
 from chatbot.teleport import build_shell_envelope, wave_mode_enabled
-from chatbot.gui_runtime import *
+from chatbot.agent_runtime import execute_file_write_from_response, file_generation_contract
 
 
 class DownloadProgressDialog:
@@ -224,7 +224,6 @@ class ChatbotGUI:
 
         
         self.model = model or DEFAULT_MODEL
-        self.workspace = os.getcwd()
         self.system_prompt = system_prompt or config.SYSTEM_PROMPT
         self.streaming_enabled = streaming_enabled
         
