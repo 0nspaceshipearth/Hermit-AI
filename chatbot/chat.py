@@ -22,6 +22,7 @@ import sys
 import json
 import time
 import os
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from chatbot.models import Message
 from chatbot import config
@@ -477,11 +478,58 @@ def _prepare_messages_for_generation(messages: List[dict], profile: Dict[str, ob
     return prepared
 
 
+def _last_user_query(messages: List[dict]) -> str:
+    for message in reversed(messages or []):
+        if str(message.get("role", "")) == "user":
+            return str(message.get("content", "") or "")
+    return ""
+
+
+def _messages_require_grounding(messages: List[dict]) -> bool:
+    if not getattr(config, "GROUNDED_OUTPUT_VALIDATOR", True):
+        return False
+    q = _last_user_query(messages).lower()
+    triggers = [
+        "grounded",
+        "artifact",
+        "citations",
+        "citation",
+        "ids",
+        "id for each fact",
+        "or return fail",
+    ]
+    return any(t in q for t in triggers)
+
+
+def _has_artifact_citations(text: str) -> bool:
+    # Matches forms like [A1:Title#chunk] used by the grounding manifest.
+    return bool(re.search(r"\[A\d+:[^\]#]+#[^\]]+\]", text or ""))
+
+
+def _apply_grounding_output_policy(output: str, messages: List[dict]) -> str:
+    if not _messages_require_grounding(messages):
+        return output
+
+    normalized = (output or "").strip()
+    if normalized.lower().startswith("fail:"):
+        return getattr(config, "GROUNDED_FRIENDLY_FAIL_MESSAGE", normalized)
+
+    if not _has_artifact_citations(normalized):
+        return getattr(config, "GROUNDED_FRIENDLY_FAIL_MESSAGE", "FAIL: insufficient grounded evidence for one or more required facts.")
+
+    return output
+
+
 def stream_chat(model: str, messages: List[dict]) -> Iterable[str]:
     """Stream chat with local model."""
     debug_print(f"stream_chat called with model='{model}'")
 
     try:
+        # Grounding requests should be validated post-generation; use one-shot path
+        # so we can enforce citation policy before emitting text.
+        if _messages_require_grounding(messages):
+            yield chat(model, messages)
+            return
         profile = _choose_generation_lane(model, messages)
         prepared_messages = _prepare_messages_for_generation(messages, profile)
         n_ctx = int(profile["n_ctx"])
@@ -580,6 +628,7 @@ def chat(model: str, messages: List[dict]) -> str:
             max_tokens=max_tokens,
         )
         output = response['choices'][0]['message']['content']
+        output = _apply_grounding_output_policy(output, messages)
         duration = time.time() - started_at
         record_generation_metrics(
             model=model,

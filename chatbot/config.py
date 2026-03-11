@@ -35,6 +35,10 @@ STRICT_RAG_MODE = False
 # Architecture-level grounding controls (model-agnostic safety gate)
 GROUNDING_MANIFEST_ENABLED = True
 GROUNDED_FACT_GATE = True
+# If true, enforce citation presence when user asks for grounded/artifact-only answers.
+GROUNDED_OUTPUT_VALIDATOR = True
+# Human-facing fallback text (internal contract can still use FAIL tokens).
+GROUNDED_FRIENDLY_FAIL_MESSAGE = "I can’t verify that from my current grounded artifacts yet."
 MIN_ARTICLE_SCORE = 2.5
 DEBUG = False
 
