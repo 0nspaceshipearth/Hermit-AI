@@ -68,6 +68,48 @@ for runtime observability, the orchestrator now publishes two compact surfaces a
 
 ---
 
+## grounded answer contract (model-agnostic)
+
+recent updates add a strict grounding contract above the final generation step:
+
+- retrieval results are tagged with stable artifact ids (for example `A1:Title#chunk`).
+- grounded-answer requests require factual claims to be traceable to those artifact ids.
+- if required facts are missing citations, hermit returns an honest fallback instead of guessing.
+
+this is intentionally architecture-level, not model-level. a 0.5b, 3b, or larger model all face the same contract.
+
+in practice this gives two properties:
+
+1. **truthfulness under pressure**: when evidence is missing, hermit fails safely.
+2. **organic UX**: user-facing fallback text can still sound natural (not robotic), while internal policy stays strict.
+
+---
+
+## retrieval hardening for indirect/biographical slots
+
+for indirect prompts like "creator of x", orchestration now does more than one naive follow-up:
+
+- resolver step finds the concrete entity (for example, `creator of Python -> Guido van Rossum`).
+- direct title probes run on resolved entity forms before broad expansion.
+- slot-oriented follow-ups are injected for biography-style needs (education, role, employment, etc.).
+- coverage normalization treats resolved placeholders correctly, reducing false "missing entity" loops.
+
+this improves the odds that citation-required answers can pass with evidence, instead of failing due to weak follow-up retrieval.
+
+---
+
+## public cloud mode path
+
+public builds now treat cloud mode as API-key configuration rather than oauth login flow:
+
+- `/cloud` configures OpenRouter URL/key/model.
+- `/turbo` activates API mode using those saved settings.
+- key persistence uses local settings storage with restrictive permissions.
+
+this keeps cloud activation simple and portable while preserving local-first architecture defaults.
+
+---
+
 ## the model tier system
 
 hermit uses different sized models for different tasks. the entity extraction, scoring, and filtering joints use a fast 1.5b parameter model because they're doing focused, specific tasks. the final generation and any reasoning heavy steps use a larger 8b model for better quality.
