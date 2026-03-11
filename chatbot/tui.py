@@ -64,7 +64,7 @@ class ChatBubble(RenderableType):
         }
         style = styles.get(self.role, "white on default")
         bubble = Panel(
-            Text(self.content, style=\"white\") if self.theme == \"dark\" else Text(self.content),
+            Text(self.content, style="white") if self.theme == \"dark\" else Text(self.content),
             title=f"[{self.role.upper()}]" if self.role != "system" else "[SYSTEM]",
             border_style=style,
             box=HEAVY_HEAD if self.theme == \"dark\" else MINIMAL,
