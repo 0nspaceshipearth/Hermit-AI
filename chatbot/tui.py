@@ -38,10 +38,10 @@ class LoadingSpinner:
     def __init__(self, console: Console):
         self.console = console
 
-    async def __call__(self, status: str = \"Thinking...\"):
+    async def __call__(self, status: str = "Thinking..."):
         with Progress(
             SpinnerColumn(),
-            TextColumn(\"[progress.description]{task.description}\"),
+            TextColumn("[progress.description]{task.description}"),
             transient=True,
         ) as progress:
             task = progress.add_task(status, total=None)
@@ -51,21 +51,21 @@ class LoadingSpinner:
 
 class ChatBubble(RenderableType):
     """Message bubble mimicking GUI style."""
-    def __init__(self, role: str, content: str, theme: str = \"dark\"):
+    def __init__(self, role: str, content: str, theme: str = "dark"):
         self.role = role
         self.content = content
         self.theme = theme
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         styles = {
-            \"user\": \"bold cyan on default\" if self.theme == \"dark\" else \"bold blue on default\",
-            \"ai\": \"green on dark_blue\" if self.theme == \"dark\" else \"white on navy\",
-            \"system\": \"yellow on black\" if self.theme == \"dark\" else \"black on yellow\",
+            "user": "bold cyan on default" if self.theme == "dark" else "bold blue on default",
+            "ai": "green on dark_blue" if self.theme == "dark" else "white on navy",
+            "system": "yellow on black" if self.theme == "dark" else "black on yellow",
         }
-        style = styles.get(self.role, \"white on default\")
+        style = styles.get(self.role, "white on default")
         bubble = Panel(
             Text(self.content, style=\"white\") if self.theme == \"dark\" else Text(self.content),
-            title=f\"[{self.role.upper()}]\" if self.role != \"system\" else \"[SYSTEM]\",
+            title=f"[{self.role.upper()}]" if self.role != "system" else "[SYSTEM]",
             border_style=style,
             box=HEAVY_HEAD if self.theme == \"dark\" else MINIMAL,
             padding=(1, 2),
@@ -83,8 +83,8 @@ class HermitTUI:
 
     def run(self):
         """Main TUI loop."""
-        self.console.print(Panel(\"Hermit TUI - Offline AI Chatbot\", style=\"bold magenta\", box=HEAVY_HEAD))
-        self.console.print(f\"[Model] {self.model} | [Workspace] {self.workspace}\", style=\"dim\")
+        self.console.print(Panel("Hermit TUI - Offline AI Chatbot", style="bold magenta", box=HEAVY_HEAD))
+        self.console.print(f"[Model] {self.model} | [Workspace] {self.workspace}", style="dim")
         self.console.print(\"─\" * 80)
 
         loop = asyncio.get_event_loop()
@@ -93,17 +93,17 @@ class HermitTUI:
     def _chat_loop(self):
         while True:
             try:
-                user_input = Prompt.ask(\"[bold cyan]You[/]\", console=self.console)
+                user_input = Prompt.ask("[bold cyan]You[/]", console=self.console)
                 if user_input.lower() in {\"quit\", \"exit\", \":q\"}:
                     break
                 if not user_input.strip():
                     continue
 
                 self.history.append(Message(role=\"user\", content=user_input))
-                self.console.print(ChatBubble(\"user\", user_input, self.theme))
+                self.console.print(ChatBubble("user", user_input, self.theme))
 
                 # Show loading
-                self.console.print(\"[bold yellow]Thinking...[/]\")
+                self.console.print("[bold yellow]Thinking...[/]")
                 turn = handle_turn(
                     system_prompt=config.SYSTEM_PROMPT,
                     history=self.history,
