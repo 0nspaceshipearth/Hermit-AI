@@ -28,7 +28,7 @@ from rich.traceback import install as install_rich_traceback
 from chatbot import config
 from chatbot.chat import build_messages
 from chatbot.models import Message
-from chatbot.agent_runtime import handle_turn
+from chatbot.agent_runtime import handle_turn, execute_teleport_for_workspace
 from chatbot.gui_runtime import execute_file_write_from_response  # Reuse shared helpers
 
 install_rich_traceback()
@@ -108,11 +108,11 @@ class HermitTUI:
                     system_prompt=config.SYSTEM_PROMPT,
                     history=self.history,
                     workspace=str(self.workspace),
-                    execute_teleport=lambda env: None,  # Placeholder; integrate if needed
+                    execute_teleport=lambda env: execute_teleport_for_workspace(env, str(self.workspace)),
                     build_messages_fn=build_messages,
                     build_messages_with_intent_fn=lambda s, h, q=None: (build_messages(s, h, q), None),
                     generate_text_fn=lambda msgs: self._generate(msgs),  # Sync wrapper
-                    execute_file_write_fn=execute_file_write_from_response,
+                    execute_file_write_fn=lambda env, resp, ws: execute_file_write_from_response(env, resp, ws),
                 )
                 # loading_task.cancel()
 
