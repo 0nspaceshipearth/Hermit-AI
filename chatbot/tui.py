@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from rich.align import Vertically
+
 from rich.box import HEAVY_HEAD, MINIMAL
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.containers import Columns, Horizontal, RenderableType
@@ -64,28 +64,28 @@ class ChatBubble(RenderableType):
         }
         style = styles.get(self.role, "white on default")
         bubble = Panel(
-            Text(self.content, style="white") if self.theme == \"dark\" else Text(self.content),
+            Text(self.content, style="white") if self.theme == "dark" else Text(self.content),
             title=f"[{self.role.upper()}]" if self.role != "system" else "[SYSTEM]",
             border_style=style,
-            box=HEAVY_HEAD if self.theme == \"dark\" else MINIMAL,
+            box=HEAVY_HEAD if self.theme == "dark" else MINIMAL,
             padding=(1, 2),
         )
         yield bubble
 
 class HermitTUI:
-    def __init__(self, model: str = config.DEFAULT_MODEL, workspace: str = \".\"):
+    def __init__(self, model: str = config.DEFAULT_MODEL, workspace: str = "."):
         self.console = Console()
         self.model = model
         self.workspace = Path(workspace).resolve()
         self.history: List[Message] = []
-        self.theme = \"dark\"  # Noir-like
+        self.theme = "dark"  # Noir-like
         self.loading = LoadingSpinner(self.console)
 
     def run(self):
         """Main TUI loop."""
         self.console.print(Panel("Hermit TUI - Offline AI Chatbot", style="bold magenta", box=HEAVY_HEAD))
         self.console.print(f"[Model] {self.model} | [Workspace] {self.workspace}", style="dim")
-        self.console.print(\"─\" * 80)
+        self.console.print("─" * 80)
 
         loop = asyncio.get_event_loop()
         self._chat_loop()
@@ -94,12 +94,12 @@ class HermitTUI:
         while True:
             try:
                 user_input = Prompt.ask("[bold cyan]You[/]", console=self.console)
-                if user_input.lower() in {\"quit\", \"exit\", \":q\"}:
+                if user_input.lower() in {"quit", "exit", ":q"}:
                     break
                 if not user_input.strip():
                     continue
 
-                self.history.append(Message(role=\"user\", content=user_input))
+                self.history.append(Message(role="user", content=user_input))
                 self.console.print(ChatBubble("user", user_input, self.theme))
 
                 # Show loading
@@ -116,24 +116,24 @@ class HermitTUI:
                 )
                 # loading_task.cancel()
 
-                if turn.path == \"wave_shell\" and turn.display_text:
-                    self.console.print(Panel(turn.display_text, title=\"📡 Shell Teleport\", border_style=\"yellow\"))
+                if turn.path == "wave_shell" and turn.display_text:
+                    self.console.print(Panel(turn.display_text, title="📡 Shell Teleport", border_style="yellow"))
                 if turn.assistant_reply:
-                    self.console.print(ChatBubble(\"ai\", turn.assistant_reply, self.theme))
-                    self.history.append(Message(role=\"assistant\", content=turn.assistant_reply))
+                    self.console.print(ChatBubble("ai", turn.assistant_reply, self.theme))
+                    self.history.append(Message(role="assistant", content=turn.assistant_reply))
 
             except KeyboardInterrupt:
-                self.console.print(\"\\n[bold red]Interrupted. Goodbye![/]\")
+                self.console.print("\\n[bold red]Interrupted. Goodbye![/]")
                 break
             except Exception as e:
-                self.console.print(f\"[bold red]Error: {e}[/]\")
+                self.console.print(f"[bold red]Error: {e}[/]")
 
     def _generate(self, messages):
         """Sync generate wrapper."""
         from chatbot.chat import full_chat
         return full_chat(self.model, messages)
 
-if __name__ == \"__main__\":
-    os.chdir(\"/mnt/space/Hermit-AI-Public\")
+if __name__ == "__main__":
+    # Workspace handled via init arg
     tui = HermitTUI()
     tui.run()
