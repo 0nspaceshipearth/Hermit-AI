@@ -57,15 +57,13 @@ ZIM_POOL_MAX_SIZE = 5  # Maximum concurrent open ZIM archives
 # API / External Model Configuration
 API_MODE = False  # If True, use external API instead of local GGUF
 API_BASE_URL = "http://localhost:1234/v1"  # Default (LM Studio / Ollama)
-API_KEY = "lm-studio"  # Often ignored by local servers but required by spec
+API_KEY = ""  # Persisted securely in ~/.hermit-public/settings.json (600 perms)
 API_MODEL_NAME = "local-model"  # Passed in API request
-API_ACCOUNT_ID = ""  # Optional ChatGPT account id for Codex OAuth flows
+API_ACCOUNT_ID = ""  # Optional account id for provider-specific integrations
 
-# Codex/OpenAI cloud auth / provider menu
-CODEX_CLOUD_PROVIDER = "openai-codex"
-CODEX_CLOUD_LOGIN_COMMAND = "openclaw models auth login --provider openai-codex"
-CODEX_CLOUD_DEFAULT_MODEL = "gpt-5.3-codex"
-CODEX_CLOUD_MODELS = ["gpt-5.3-codex", "gpt-5.4", "gpt-4o"]
+# Public cloud provider defaults (OpenRouter)
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini"
 
 # Multi-Joint RAG System Configuration
 USE_JOINTS = True
