@@ -31,14 +31,17 @@ os.chdir(script_dir)
 # Add to path and import
 sys.path.insert(0, script_dir)
 
-from chatbot import ChatbotGUI
-from chatbot.config import DEFAULT_MODEL, DEBUG
+from chatbot import config
+from chatbot.tui import HermitTUI
+from chatbot.gui import ChatbotGUI
+# from chatbot.config import DEFAULT_MODEL, DEBUG  # Moved to config import
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hermit Chatbot")
     parser.add_argument("--debug", action="store_true", help="Enable detailed debug output")
-    parser.add_argument("--cli", action="store_true", help="Run in command-line interface mode")
-    parser.add_argument("model", nargs="?", default=DEFAULT_MODEL, help="Ollama model to use")
+    parser.add_argument("--cli", action="store_true", help="Run legacy CLI mode")
+    parser.add_argument("--gui", action="store_true", help="Run legacy GUI mode (default: new TUI)")
+    parser.add_argument("model", nargs="?", default=config.DEFAULT_MODEL, help="Ollama model to use")
     
     args = parser.parse_args()
     
@@ -58,7 +61,7 @@ if __name__ == "__main__":
         print(f"[DEBUG] Using model: {args.model}", file=sys.stderr)
         print(f"[DEBUG] Script directory: {script_dir}", file=sys.stderr)
     
-    # Check for CLI mode
+    # Default to new TUI; --gui for legacy GUI; --cli for legacy CLI
     if args.cli:
         from chatbot.cli import ChatbotCLI
         try:
@@ -71,10 +74,27 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"CLI Error: {e}", file=sys.stderr)
             sys.exit(1)
-
-    try:
-        app = ChatbotGUI(args.model)
-        app.run()
+    elif args.gui:
+        try:
+            app = ChatbotGUI(args.model)
+            app.run()
+        except KeyboardInterrupt:
+            pass
+        except RuntimeError as e:
+            if args.debug:
+                print(f"[DEBUG] RuntimeError: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Default: New TUI
+        try:
+            tui = HermitTUI(args.model)
+            tui.run()
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            sys.exit(0)
+        except Exception as e:
+            print(f"TUI Error: {e}", file=sys.stderr)
+            sys.exit(1)
     except KeyboardInterrupt:
         if args.debug:
             print("\n[DEBUG] Interrupted by user", file=sys.stderr)
