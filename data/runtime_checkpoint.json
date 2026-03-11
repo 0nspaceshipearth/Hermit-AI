@@ -1,0 +1,39 @@
+{
+  "artifacts": [
+    {
+      "note": "primary retrieval pass",
+      "query": "Who was the last Emperor of the Western Roman Empire?",
+      "status": "ok",
+      "step": "search",
+      "type": "local_retrieval"
+    }
+  ],
+  "constraints": [
+    "Prefer verified source facts when present.",
+    "Preserve only compact residue across resets.",
+    "Do not drop retrieved artifacts that support the current answer."
+  ],
+  "contract_version": "contracted_cognition.v1",
+  "drop_list": [
+    "Discard transient chain-of-thought and stale scratch state.",
+    "Keep only compact residue plus typed artifacts."
+  ],
+  "frontier": [
+    "resolve",
+    "score",
+    "verify"
+  ],
+  "next_step": "resolve",
+  "objective": "multi_hop_resolution",
+  "open_loops": [
+    "Who was the last Emperor of the Western Roman Empire?"
+  ],
+  "query": "Who was the last Emperor of the Western Roman Empire?",
+  "risk": "high",
+  "source": {
+    "result_count": 3,
+    "routing_mode": "retrieval_tools",
+    "routing_reason": "reference_resolution_likely_needed"
+  },
+  "updated_at": 1773191162
+}
