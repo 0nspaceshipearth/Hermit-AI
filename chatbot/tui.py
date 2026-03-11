@@ -80,17 +80,6 @@ class HermitTUI:
         self.history: List[Message] = []
         self.theme = "dark"  # Noir-like
         self.loading = LoadingSpinner(self.console)
-        self.rag = None
-        print(f"Initializing RAG System (Model: {model})...")
-        try:
-            from chatbot.rag import RAGSystem
-            self.rag = RAGSystem()
-            import chatbot.chat
-            chatbot.chat._rag_system = self.rag
-            print("RAG System Ready.")
-        except Exception as e:
-            print(f"Error initializing RAG: {e}")
-            print("Some functionality may be limited.")
 
     def run(self):
         """Main TUI loop."""
@@ -143,13 +132,6 @@ class HermitTUI:
         """Sync generate wrapper."""
         from chatbot.chat import full_chat
         return full_chat(self.model, messages)
-
-    def __del__(self):
-        try:
-            from chatbot.model_manager import ModelManager
-            ModelManager.close_all()
-        except:
-            pass
 
 if __name__ == "__main__":
     # Workspace handled via init arg
