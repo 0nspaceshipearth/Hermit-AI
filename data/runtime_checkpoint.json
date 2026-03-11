@@ -2,7 +2,7 @@
   "artifacts": [
     {
       "note": "primary retrieval pass",
-      "query": "Who was the last Emperor of the Western Roman Empire?",
+      "query": "Is reverse engineering a proprietary driver for interoperability legal in the US?",
       "status": "ok",
       "step": "search",
       "type": "local_retrieval"
@@ -19,21 +19,25 @@
     "Keep only compact residue plus typed artifacts."
   ],
   "frontier": [
-    "resolve",
     "score",
-    "verify"
+    "verify",
+    "expand"
   ],
-  "next_step": "resolve",
-  "objective": "multi_hop_resolution",
+  "next_step": "score",
+  "objective": "factual_lookup",
   "open_loops": [
-    "Who was the last Emperor of the Western Roman Empire?"
+    "Who was the last Emperor of the Western Roman Empire?",
+    "Who devised the 'Turing Test' and in what year?",
+    "Who is the author of the Python programming language?",
+    "What are the elements of a valid contract?",
+    "What is the half-life of Caffeine in the human body?"
   ],
-  "query": "Who was the last Emperor of the Western Roman Empire?",
+  "query": "Is reverse engineering a proprietary driver for interoperability legal in the US?",
   "risk": "high",
   "source": {
     "result_count": 3,
-    "routing_mode": "retrieval_tools",
-    "routing_reason": "reference_resolution_likely_needed"
+    "routing_mode": "local_only",
+    "routing_reason": "straightforward_local_lookup"
   },
-  "updated_at": 1773191162
+  "updated_at": 1773191239
 }
