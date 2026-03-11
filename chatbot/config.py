@@ -32,6 +32,9 @@ DEFAULT_MODEL = MODEL_QWEN_3B   # Default for public release
 # DEFAULT_MODEL = MODEL_QWEN_1_5B  # Fastest, lowest VRAM
 # DEFAULT_MODEL = MODEL_NVIDIA_8B  # Best quality, needs 6GB free VRAM
 STRICT_RAG_MODE = False
+# Architecture-level grounding controls (model-agnostic safety gate)
+GROUNDING_MANIFEST_ENABLED = True
+GROUNDED_FACT_GATE = True
 MIN_ARTICLE_SCORE = 2.5
 DEBUG = False
 

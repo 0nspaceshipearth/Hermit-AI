@@ -650,6 +650,29 @@ def retrieve_and_display_links(query: str) -> List[dict]:
         return []
 
 
+def _artifact_id_for_result(index: int, result: Dict[str, Any]) -> str:
+    metadata = result.get('metadata', {}) if isinstance(result, dict) else {}
+    title = str(metadata.get('title', 'unknown')).strip().replace(' ', '_')
+    chunk_id = str(metadata.get('chunk_id', index)).strip() or str(index)
+    return f"A{index}:{title}#{chunk_id}"
+
+
+def _build_grounding_manifest(results: List[Dict[str, Any]]) -> str:
+    if not results:
+        return ""
+
+    lines = ["\n\n=== GROUNDING SOURCE MANIFEST ==="]
+    for i, result in enumerate(results, 1):
+        metadata = result.get('metadata', {})
+        title = metadata.get('title', 'Unknown')
+        path = metadata.get('path', '')
+        score = result.get('score', 0.0)
+        artifact_id = _artifact_id_for_result(i, result)
+        lines.append(f"- [{artifact_id}] title={title} score={score:.3f} path={path}")
+    lines.append("================================")
+    return "\n".join(lines)
+
+
 def build_messages(system_prompt: str, history: List[Message], user_query: str = None) -> List[dict]:
     """Build message list for local LLM with RAG augmentation."""
     debug_print("="*60)
@@ -697,11 +720,12 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                     text = r['text']
                     title = meta.get('title', 'Unknown')
                     score = r.get('score', 0.0)
+                    artifact_id = _artifact_id_for_result(i, r)
 
                     if len(text) > 4000:
                         text = text[:4000] + "...(truncated)"
 
-                    chunk_text = f"\n--- Source {i}: {title} ---\n{text}\n"
+                    chunk_text = f"\n--- Source {i} [{artifact_id}]: {title} ---\n{text}\n"
 
                     if total_context_chars + len(chunk_text) > max_context_chars:
                         debug_print(f"Context limit reached ({max_context_chars} chars). Stopping at result {i}.")
@@ -740,6 +764,9 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                         context_text += f"- {fact}\n"
                     context_text += "======================================================\n"
 
+                if getattr(config, 'GROUNDING_MANIFEST_ENABLED', True):
+                    context_text += _build_grounding_manifest(results)
+
                 debug_print(f"Context assembled: {len(context_text)} chars total")
             else:
                 debug_print("No results returned from RAG")
@@ -773,7 +800,7 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
 
     instructions = f"\n\nCRITICAL INSTRUCTIONS:\n" \
                    f"1. PREFER CONTEXT: Answer based primarily on the provided context below.\n" \
-                   f"2. BE ACCURATE: Do not make up facts. You may use general knowledge to supplement context if needed.\n" \
+                   f"2. BE ACCURATE: Do not make up facts. You may use general knowledge to supplement context only when grounding mode allows it.\n" \
                    f"3. VERIFY PREMISES: If the user asks a leading question (e.g., 'When did X do Y?') and the context says X *never* did Y, you MUST correct the premise.\n" \
                    f"4. HANDLE CONFLICTS: If context has conflicting info, state BOTH sides clearly.\n" \
                    f"5. SYNTHESIZE: Combine the context with your knowledge to provide a complete, accurate answer.\n" \
@@ -782,6 +809,15 @@ def build_messages(system_prompt: str, history: List[Message], user_query: str =
                    f"8. BE HELPFUL: If the context is partial or the match is not perfect, try to infer the answer or use related information to help the user instead of simply refusing.\n" \
                    f"9. NATURAL TONE: You are an expert. Do NOT mention 'RAG', 'context', 'retrieved documents', or 'knowledge base' in your final answer. Integrate the information naturally as if you already knew it.\n" \
                    f"10. CONTRACTED COGNITION: Use the handoff block to reconstruct task-relevant state after resets. Preserve typed artifacts and compact residue; discard transient scratch reasoning."
+
+    if getattr(config, 'GROUNDED_FACT_GATE', True):
+        instructions += (
+            "\n11. GROUNDED FACT GATE: For factual claims, cite at least one artifact ID from the GROUNDING SOURCE MANIFEST "
+            "using bracket form like [A1:Title#chunk]."
+            "\n12. NO UNSOURCED FACTS: If you cannot support a required fact with at least one artifact ID, do not guess. "
+            "Reply exactly: FAIL: insufficient grounded evidence for one or more required facts."
+            "\n13. MODEL-AGNOSTIC CONTRACT: This citation rule applies regardless of model size or tier."
+        )
 
     if results:
         search_ctx = results[0].get('search_context', {})
