@@ -39,9 +39,10 @@ from chatbot.gui import ChatbotGUI
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hermit Chatbot")
     parser.add_argument("--debug", action="store_true", help="Enable detailed debug output")
-    parser.add_argument("--cli", action="store_true", help="Run legacy CLI mode")
-    parser.add_argument("--gui", action="store_true", help="Run legacy GUI mode (default: new TUI)")
-    parser.add_argument("model", nargs="?", default=config.DEFAULT_MODEL, help="Ollama model to use")
+    # Legacy flags deprecated; use TUI only
+    parser.add_argument("--cli", action="store_true", help="Legacy CLI mode (deprecated)")
+    parser.add_argument("--gui", action="store_true", help="Legacy GUI mode (deprecated)")
+    parser.add_argument("model", nargs="?", default=config.DEFAULT_MODEL, help="Model to use")
     
     args = parser.parse_args()
     
@@ -87,7 +88,8 @@ if __name__ == "__main__":
     else:
         # Default: New TUI
         try:
-            tui = HermitTUI(args.model)
+            workspace = script_dir
+            tui = HermitTUI(args.model, workspace=workspace)
             tui.run()
         except KeyboardInterrupt:
             print("\nGoodbye!")
