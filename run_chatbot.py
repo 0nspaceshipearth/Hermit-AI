@@ -49,7 +49,7 @@ if __name__ == "__main__":
     if args.model and " " in args.model:
         if args.debug:
             print(f"[WARNING] Argument '{args.model}' ignored (looks like a query, not a model). Using default.", file=sys.stderr)
-        args.model = config.DEFAULT_MODEL
+        args.model = DEFAULT_MODEL
     
     # Set DEBUG flag in config
     from chatbot import config
