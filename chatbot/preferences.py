@@ -65,3 +65,24 @@ def save_theme_name(name: str) -> None:
     settings = _load_settings()
     settings["theme"] = name
     _save_settings(settings)
+
+
+def load_api_prefs() -> Dict[str, Any]:
+    """Load persisted API settings for public builds.
+
+    Stored in ~/.hermit-public/settings.json (chmod 600) alongside theme prefs.
+    """
+    settings = _load_settings()
+    api = settings.get("api")
+    return api if isinstance(api, dict) else {}
+
+
+def save_api_prefs(*, base_url: str, api_key: str, model: str) -> None:
+    """Persist API credentials/settings with restrictive file permissions."""
+    settings = _load_settings()
+    settings["api"] = {
+        "base_url": base_url or "",
+        "api_key": api_key or "",
+        "model": model or "",
+    }
+    _save_settings(settings)

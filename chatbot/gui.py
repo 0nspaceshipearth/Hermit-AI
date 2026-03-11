@@ -46,7 +46,7 @@ from chatbot.chat import (
 from chatbot import config
 from chatbot.config import DEFAULT_MODEL
 from chatbot.model_manager import set_download_callback, ModelManager
-from chatbot.preferences import load_theme_name, save_theme_name
+from chatbot.preferences import load_theme_name, save_theme_name, load_api_prefs, save_api_prefs
 from chatbot.teleport import build_shell_envelope, wave_mode_enabled
 from chatbot.agent_runtime import execute_file_write_from_response, file_generation_contract
 
@@ -232,6 +232,13 @@ class ChatbotGUI:
         self.themes = self._build_themes()
         saved_theme = load_theme_name()
         self.theme_name = saved_theme if saved_theme in self.themes else "Noir"
+
+        # Load persisted public API settings (including OpenRouter key).
+        api_prefs = load_api_prefs()
+        if api_prefs:
+            config.API_BASE_URL = str(api_prefs.get("base_url") or config.API_BASE_URL)
+            config.API_KEY = str(api_prefs.get("api_key") or config.API_KEY)
+            config.API_MODEL_NAME = str(api_prefs.get("model") or config.API_MODEL_NAME)
         self._theme_palette = self.themes[self.theme_name]
         self.dark_mode = self._theme_palette["dark"]
         self.use_terminal_dialogs = True
@@ -1276,6 +1283,7 @@ class ChatbotGUI:
         config.API_BASE_URL = data["url"]
         config.API_KEY = data["key"]
         config.API_MODEL_NAME = data["model"]
+        save_api_prefs(base_url=config.API_BASE_URL, api_key=config.API_KEY, model=config.API_MODEL_NAME)
 
         from chatbot.model_manager import ModelManager
         ModelManager.close_all()
@@ -1312,35 +1320,31 @@ class ChatbotGUI:
         threading.Thread(target=run_test, daemon=True).start()
 
     def _enter_cloud_mode(self):
-        items = [getattr(config, "CODEX_CLOUD_PROVIDER", "openai-codex")]
         self.command_mode = {
             "name": "cloud",
-            "type": "menu",
-            "items": items,
-            "display": ["OpenAI Codex"],
-            "index": 0,
-            "pending": None,
+            "type": "input",
+            "url": getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            "key": (getattr(config, "API_KEY", "") or "").strip(),
+            "model": (getattr(config, "API_MODEL_NAME", "") or getattr(config, "OPENROUTER_DEFAULT_MODEL", "openai/gpt-4o-mini")).strip(),
         }
         self._render_cloud_menu()
 
     def _render_cloud_menu(self):
-        items = self.command_mode.get("items", [])
-        display = self.command_mode.get("display", [])
-        idx = self.command_mode.get("index", 0)
-        lines = []
-        for i, name in enumerate(items):
-            marker = ">" if i == idx else " "
-            label = display[i] if i < len(display) else name.title()
-            lines.append(f"{marker} {i+1}. {label}")
-
-        footer = "Use Up/Down and Enter. Enter launches the OpenClaw Codex login flow for the selected provider."
-
+        data = self.command_mode
+        mask = lambda v: ("*" * len(v)) if v else "None"
         text = (
-            "CLOUD PROVIDERS\n"
-            "Codex/OpenAI auth only in this build.\n\n"
-            + "\n".join(lines)
-            + "\n\n"
-            + footer
+            "OPENROUTER CLOUD SETUP\n"
+            "Configure your OpenRouter API key for /turbo.\n\n"
+            f"url: {data.get('url') or 'None'}\n"
+            f"key: {mask(data.get('key', ''))}\n"
+            f"model: {data.get('model') or 'None'}\n\n"
+            "Commands:\n"
+            "  key <openrouter_api_key>\n"
+            "  model <openrouter_model_id>\n"
+            "  url <base_url>\n"
+            "  test\n"
+            "  save\n"
+            "  cancel (Esc)\n"
         )
         self._render_terminal_menu(text)
 
@@ -1449,46 +1453,55 @@ class ChatbotGUI:
             self._post_system(f"Failed to start Codex auth flow: {e}")
 
     def _activate_cloud_provider(self, provider: str):
-        expected = getattr(config, "CODEX_CLOUD_PROVIDER", "openai-codex")
-        if provider != expected:
-            self.append_message("system", f"Unsupported cloud provider: {provider}")
-            return
-
-        self.append_message("system", "Starting Codex sign-in inside Hermit…")
-        threading.Thread(target=self._run_codex_auth_in_app, daemon=True).start()
-        self._close_command_mode()
+        # Compatibility shim; /cloud now configures OpenRouter credentials directly.
+        self.append_message("system", "Cloud provider menu removed. Use /cloud to set your OpenRouter key.")
 
     def _handle_cloud_input(self, user_input: str):
         text = user_input.strip()
         lowered = text.lower()
 
         if not text:
-            items = self.command_mode.get("items", [])
-            idx = self.command_mode.get("index", 0)
-            if items:
-                self._activate_cloud_provider(items[idx])
+            self._render_cloud_menu()
             return
 
         if lowered in {"cancel", "exit", "quit"}:
             self._exit_command_mode(cancelled=True)
             return
 
-        if text.isdigit():
-            idx = int(text) - 1
-            items = self.command_mode.get("items", [])
-            if 0 <= idx < len(items):
-                self.command_mode["index"] = idx
-                self._activate_cloud_provider(items[idx])
-                return
+        if lowered == "test":
+            self._test_api_connection()
+            return
 
-        items = self.command_mode.get("items", [])
-        for i, item in enumerate(items):
-            if lowered == item.lower():
-                self.command_mode["index"] = i
-                self._activate_cloud_provider(item)
-                return
+        if lowered == "save":
+            url = (self.command_mode.get("url") or getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")).strip()
+            key = (self.command_mode.get("key") or "").strip()
+            model = (self.command_mode.get("model") or getattr(config, "OPENROUTER_DEFAULT_MODEL", "openai/gpt-4o-mini")).strip()
 
-        self.append_message("system", "Unknown cloud provider selection.")
+            config.API_BASE_URL = url
+            config.API_KEY = key
+            config.API_MODEL_NAME = model
+            config.API_MODE = False  # /turbo enables API mode.
+            save_api_prefs(base_url=url, api_key=key, model=model)
+            self.append_message("system", "OpenRouter settings saved. Run /turbo to activate cloud mode.")
+            self._close_command_mode()
+            return
+
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            field, value = parts[0].lower(), parts[1].strip()
+            if field == "key":
+                self.command_mode["key"] = value
+            elif field == "model":
+                self.command_mode["model"] = value
+            elif field == "url":
+                self.command_mode["url"] = value
+            else:
+                self.append_message("system", "Unknown cloud command.")
+                return
+            self._render_cloud_menu()
+            return
+
+        self.append_message("system", "Invalid cloud command. Use key/model/url/test/save/cancel.")
 
     def _enter_forge_mode(self, args_line: Optional[str] = None):
         self.command_mode = {
@@ -3018,12 +3031,14 @@ class ChatbotGUI:
     def _enable_turbo_mode(self) -> bool:
         key = (getattr(config, "API_KEY", "") or "").strip()
         if not key:
-            self.append_message("system", "Turbo needs cloud auth first. Run /cloud and sign in.")
+            self.append_message("system", "Turbo needs an OpenRouter API key. Run /cloud, set key, then save.")
             return False
 
         config.API_MODE = True
+        if not getattr(config, "API_BASE_URL", ""):
+            config.API_BASE_URL = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         if not getattr(config, "API_MODEL_NAME", ""):
-            config.API_MODEL_NAME = getattr(config, "CODEX_CLOUD_DEFAULT_MODEL", "gpt-5.3-codex")
+            config.API_MODEL_NAME = getattr(config, "OPENROUTER_DEFAULT_MODEL", "openai/gpt-4o-mini")
         self.model = config.API_MODEL_NAME
         self.root.title(f"Chatbot - API: {self.model} ({'Link Mode' if self.link_mode else 'Response Mode'})")
         # Codex backend streaming event shapes can drift; keep turbo stable with blocking requests.
@@ -3110,7 +3125,7 @@ class ChatbotGUI:
   /tree              Open model/joint system tree
   /status            Show system status
   /api               Configure external API mode
-  /cloud             Open Codex/OpenAI cloud auth menu
+  /cloud             Configure OpenRouter key/model for turbo mode
   /turbo             Quick-switch to cloud/API provider mode
   /local             Switch back to local/on-device provider mode
   /forge             Build a ZIM from local docs
@@ -3509,6 +3524,7 @@ Keyboard Shortcuts:
             config.API_BASE_URL = url_var.get()
             config.API_KEY = key_var.get()
             config.API_MODEL_NAME = model_var.get()
+            save_api_prefs(base_url=config.API_BASE_URL, api_key=config.API_KEY, model=config.API_MODEL_NAME)
             
             # Reset ModelManager to force reload next time
             from chatbot.model_manager import ModelManager
