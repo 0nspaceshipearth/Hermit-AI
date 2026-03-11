@@ -88,12 +88,12 @@ class HermitTUI:
         self.console.print(\"─\" * 80)
 
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(self._chat_loop())
+        self._chat_loop()
 
-    async def _chat_loop(self):
+    def _chat_loop(self):
         while True:
             try:
-                user_input = await Prompt.ask(\"[bold cyan]You[/]\", console=self.console)
+                user_input = Prompt.ask(\"[bold cyan]You[/]\", console=self.console)
                 if user_input.lower() in {\"quit\", \"exit\", \":q\"}:
                     break
                 if not user_input.strip():
@@ -103,7 +103,7 @@ class HermitTUI:
                 self.console.print(ChatBubble(\"user\", user_input, self.theme))
 
                 # Show loading
-                loading_task = asyncio.create_task(self.loading(\"Processing...\"))
+                self.console.print(\"[bold yellow]Thinking...[/]\")
                 turn = handle_turn(
                     system_prompt=config.SYSTEM_PROMPT,
                     history=self.history,
@@ -114,7 +114,7 @@ class HermitTUI:
                     generate_text_fn=lambda msgs: self._generate(msgs),  # Sync wrapper
                     execute_file_write_fn=execute_file_write_from_response,
                 )
-                loading_task.cancel()
+                # loading_task.cancel()
 
                 if turn.path == \"wave_shell\" and turn.display_text:
                     self.console.print(Panel(turn.display_text, title=\"📡 Shell Teleport\", border_style=\"yellow\"))
