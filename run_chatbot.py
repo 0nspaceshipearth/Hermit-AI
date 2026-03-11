@@ -95,4 +95,13 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"TUI Error: {e}", file=sys.stderr)
             sys.exit(1)
+    except KeyboardInterrupt:
+        if args.debug:
+            print("\n[DEBUG] Interrupted by user", file=sys.stderr)
+        pass
+    except RuntimeError as e:
+        if args.debug:
+            print(f"[DEBUG] RuntimeError: {e}", file=sys.stderr)
+        # Error already handled by GUI, no need to print to terminal
+        sys.exit(1)
 
