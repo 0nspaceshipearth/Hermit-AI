@@ -2,7 +2,7 @@
   "artifacts": [
     {
       "note": "primary retrieval pass",
-      "query": "Is reverse engineering a proprietary driver for interoperability legal in the US?",
+      "query": "How do I set up a static IP on a Raspberry Pi?",
       "status": "ok",
       "step": "search",
       "type": "local_retrieval"
@@ -32,12 +32,12 @@
     "What are the elements of a valid contract?",
     "What is the half-life of Caffeine in the human body?"
   ],
-  "query": "Is reverse engineering a proprietary driver for interoperability legal in the US?",
+  "query": "How do I set up a static IP on a Raspberry Pi?",
   "risk": "high",
   "source": {
-    "result_count": 3,
+    "result_count": 2,
     "routing_mode": "local_only",
     "routing_reason": "straightforward_local_lookup"
   },
-  "updated_at": 1773191239
+  "updated_at": 1773191314
 }
