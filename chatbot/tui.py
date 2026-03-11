@@ -34,7 +34,7 @@ from chatbot.gui_runtime import execute_file_write_from_response  # Reuse shared
 install_rich_traceback()
 
 class LoadingSpinner:
-    """Animated loading indicator."""
+    \"\"\"Animated loading indicator.\"\"\"
     def __init__(self, console: Console):
         self.console = console
 
@@ -50,7 +50,7 @@ class LoadingSpinner:
                 await asyncio.sleep(0.1)
 
 class ChatBubble(RenderableType):
-    """Message bubble mimicking GUI style."""
+    \"\"\"Message bubble mimicking GUI style.\"\"\"
     def __init__(self, role: str, content: str, theme: str = \"dark\"):
         self.role = role
         self.content = content
@@ -82,7 +82,7 @@ class HermitTUI:
         self.loading = LoadingSpinner(self.console)
 
     def run(self):
-        """Main TUI loop."""
+        \"\"\"Main TUI loop.\"\"\"
         self.console.print(Panel(\"Hermit TUI - Offline AI Chatbot\", style=\"bold magenta\", box=HEAVY_HEAD))
         self.console.print(f\"[Model] {self.model} | [Workspace] {self.workspace}\", style=\"dim\")
         self.console.print(\"─\" * 80)
@@ -129,7 +129,7 @@ class HermitTUI:
                 self.console.print(f\"[bold red]Error: {e}[/]\")
 
     def _generate(self, messages):
-        """Sync generate wrapper."""
+        \"\"\"Sync generate wrapper.\"\"\"
         from chatbot.chat import full_chat
         return full_chat(self.model, messages)
 
