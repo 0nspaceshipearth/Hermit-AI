@@ -243,6 +243,51 @@ class OrchestrationModule:
             ctx.log(f"  ⚠ Entity extraction failed: {e}")
             ctx.signals["ambiguity_score"] = 0.5
 
+    def _build_slot_followup_queries(self, ctx: HermitContext, resolved_entity: str) -> List[str]:
+        """Build targeted follow-up lookups for biography/slot-style questions.
+
+        Keeps this deterministic and model-agnostic so small models can still
+        trigger richer retrieval passes.
+        """
+        query = (ctx.original_query or "").lower()
+        base = (resolved_entity or "").strip()
+        if not base:
+            return []
+
+        candidates: List[str] = [base, f"{base} biography"]
+
+        # Education-style slots
+        education_hints = ["university", "attend", "education", "study", "school", "degree"]
+        if any(h in query for h in education_hints):
+            candidates.extend([
+                f"{base} education",
+                f"{base} university",
+                f"{base} studied",
+                f"{base} attended",
+            ])
+
+        # Role/employment-style slots
+        employment_hints = ["role", "position", "job", "worked", "work", "at "]
+        if any(h in query for h in employment_hints):
+            candidates.extend([
+                f"{base} career",
+                f"{base} employment",
+                f"{base} role",
+                f"{base} dropbox",
+                f"{base} dropbox role",
+            ])
+
+        # Dedupe while preserving order
+        seen = set()
+        ordered: List[str] = []
+        for c in candidates:
+            k = c.strip().lower()
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            ordered.append(c.strip())
+        return ordered[:8]
+
     def _orchestrate_resolve(self, ctx) -> None:
         """Resolve indirect entity references using multi-hop resolution."""
         # Skip for simple queries (optimization)
@@ -278,9 +323,22 @@ class OrchestrationModule:
                 ctx.iteration_results['resolved_entity'] = resolved_entity
                 ctx.iteration_results['multi_hop_searches'] = search_terms
                 
-                # Inject search for resolved entity
-                for term in search_terms[:2]:  # Try top 2 variations
-                    results = self._retrieve_without_orchestration(term, top_k=3)
+                # Inject search for resolved entity + slot-oriented probes
+                follow_up_terms = []
+                follow_up_terms.extend(search_terms[:3])
+                follow_up_terms.extend(self._build_slot_followup_queries(ctx, resolved_entity))
+
+                seen_terms = set()
+                total_added = 0
+                attempts = 0
+                for term in follow_up_terms:
+                    norm = term.strip().lower()
+                    if not norm or norm in seen_terms:
+                        continue
+                    seen_terms.add(norm)
+                    attempts += 1
+
+                    results = self._retrieve_without_orchestration(term, top_k=4)
                     ctx.record_excursion(
                         step="resolve",
                         mode="retrieval_tool",
@@ -291,8 +349,14 @@ class OrchestrationModule:
                     )
                     if results:
                         added = self._merge_unique_results(ctx, results)
+                        total_added += added
                         ctx.log(f"  Retrieved {len(results)} articles for '{term}' ({added} unique)")
+
+                    # Stop early once we have enough unique records for downstream scoring.
+                    if len(ctx.retrieved_data) >= 8 or total_added >= 5:
                         break
+
+                ctx.log(f"  Multi-hop follow-up attempts: {attempts}, total unique additions: {total_added}")
             else:
                 ctx.log("  No indirect references detected")
                 
