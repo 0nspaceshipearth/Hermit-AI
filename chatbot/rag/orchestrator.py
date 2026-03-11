@@ -288,6 +288,32 @@ class OrchestrationModule:
             ordered.append(c.strip())
         return ordered[:8]
 
+    def _direct_title_probe(self, title: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Attempt exact/near-exact title retrieval without full candidate generation."""
+        if not title:
+            return []
+
+        probes = [title.strip()]
+        probes.append(title.replace('_', ' ').strip())
+        probes.append(title.replace(' ', '_').strip())
+
+        seen = set()
+        results: List[Dict[str, Any]] = []
+        for probe in probes:
+            key = probe.lower()
+            if not probe or key in seen:
+                continue
+            seen.add(key)
+            try:
+                hits = self.search_by_title(probe)[:top_k]
+                for h in hits:
+                    h.setdefault('score', 9.5)
+                results.extend(hits)
+            except Exception:
+                continue
+
+        return results
+
     def _orchestrate_resolve(self, ctx) -> None:
         """Resolve indirect entity references using multi-hop resolution."""
         # Skip for simple queries (optimization)
@@ -328,8 +354,23 @@ class OrchestrationModule:
                 follow_up_terms.extend(search_terms[:3])
                 follow_up_terms.extend(self._build_slot_followup_queries(ctx, resolved_entity))
 
-                seen_terms = set()
+                # First, do direct title probes for resolved entity forms.
                 total_added = 0
+                direct_hits = self._direct_title_probe(resolved_entity, top_k=6)
+                if direct_hits:
+                    added = self._merge_unique_results(ctx, direct_hits)
+                    total_added += added
+                    ctx.record_excursion(
+                        step="resolve",
+                        mode="retrieval_tool",
+                        query=resolved_entity,
+                        status="ok",
+                        note="direct title probe for resolved entity",
+                        payload={"result_count": len(direct_hits), "unique_added": added},
+                    )
+                    ctx.log(f"  Direct probe for '{resolved_entity}' added {added} unique results")
+
+                seen_terms = set()
                 attempts = 0
                 for term in follow_up_terms:
                     norm = term.strip().lower()
@@ -466,18 +507,39 @@ class OrchestrationModule:
                 ctx.retrieved_data
             )
             
-            total_entities = len(ctx.extracted_entities.get('entities', []))
-            covered_entities = len(coverage_result.get('covered', []))
-            
+            covered = list(coverage_result.get('covered', []))
+            missing = list(coverage_result.get('missing', []))
+
+            # Normalize indirect placeholders if resolver already produced a concrete entity.
+            resolved_entity = str(ctx.iteration_results.get('resolved_entity') or '').strip()
+            if resolved_entity and missing:
+                lowered_titles = [
+                    str(r.get('metadata', {}).get('title', '')).lower()
+                    for r in (ctx.retrieved_data or [])
+                ]
+                resolved_seen = any(resolved_entity.lower() in t for t in lowered_titles)
+                if resolved_seen:
+                    rewritten_missing = []
+                    for m in missing:
+                        ml = str(m).lower()
+                        if ('creator of' in ml or 'inventor of' in ml or 'founder of' in ml):
+                            covered.append(resolved_entity)
+                            continue
+                        rewritten_missing.append(m)
+                    missing = rewritten_missing
+
+            total_entities = len(covered) + len(missing)
+            covered_entities = len(covered)
+
             if total_entities > 0:
                 ctx.signals["coverage_ratio"] = covered_entities / total_entities
             else:
                 ctx.signals["coverage_ratio"] = 1.0
-                
+
             ctx.log(f"  Coverage: {covered_entities}/{total_entities} entities ({ctx.signals['coverage_ratio']:.0%})")
-            
+
             # Store missing entities for targeted search
-            ctx.iteration_results['missing_entities'] = coverage_result.get('missing', [])
+            ctx.iteration_results['missing_entities'] = missing
             ctx.iteration_results['suggested_searches'] = coverage_result.get('suggested_searches', [])
             
         except Exception as e:
@@ -539,8 +601,36 @@ class OrchestrationModule:
             # Use suggested searches if available, otherwise use entity names
             search_terms = suggested[:5] if suggested else missing[:3]
 
-            total_added = 0
+            # If resolver found a concrete entity, prioritize slot probes for it.
+            resolved_entity = str(ctx.iteration_results.get('resolved_entity') or '').strip()
+            if resolved_entity:
+                slot_terms = self._build_slot_followup_queries(ctx, resolved_entity)
+                search_terms = slot_terms + search_terms
+
+                direct_hits = self._direct_title_probe(resolved_entity, top_k=6)
+                if direct_hits:
+                    added = self._merge_unique_results(ctx, direct_hits)
+                    ctx.record_excursion(
+                        step="targeted_search",
+                        mode="retrieval_tool",
+                        query=resolved_entity,
+                        status="ok",
+                        note="direct title probe during targeted search",
+                        payload={"result_count": len(direct_hits), "unique_added": added},
+                    )
+
+            # dedupe terms while preserving order
+            deduped_terms = []
+            seen_terms = set()
             for term in search_terms:
+                norm = str(term).strip().lower()
+                if not norm or norm in seen_terms:
+                    continue
+                seen_terms.add(norm)
+                deduped_terms.append(str(term).strip())
+
+            total_added = 0
+            for term in deduped_terms[:8]:
                 results = self._retrieve_without_orchestration(term, top_k=2)
                 added = self._merge_unique_results(ctx, results)
                 total_added += added
@@ -557,7 +647,7 @@ class OrchestrationModule:
                     },
                 )
             ctx.log(
-                f"  Targeted search for {len(search_terms)} missing entities "
+                f"  Targeted search executed across {len(deduped_terms[:8])} terms "
                 f"({total_added} unique additions)"
             )
             
