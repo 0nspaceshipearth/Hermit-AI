@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-\"\"\"Rich TUI frontend for Hermit, preserving GUI look/feel.\"\"\"
+"""Rich TUI frontend for Hermit, preserving GUI look/feel."""
 import asyncio
 import os
 import sys
