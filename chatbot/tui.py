@@ -14,7 +14,7 @@ from typing import List
 
 from rich.box import HEAVY_HEAD, MINIMAL
 from rich.console import Console, ConsoleOptions, RenderResult
-from rich.containers import Columns, Horizontal, RenderableType
+# from rich.containers import Columns, Horizontal, RenderableType
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -49,7 +49,7 @@ class LoadingSpinner:
                 progress.update(task, description=status)
                 await asyncio.sleep(0.1)
 
-class ChatBubble(RenderableType):
+class ChatBubble:
     """Message bubble mimicking GUI style."""
     def __init__(self, role: str, content: str, theme: str = "dark"):
         self.role = role
@@ -87,7 +87,7 @@ class HermitTUI:
         self.console.print(f"[Model] {self.model} | [Workspace] {self.workspace}", style="dim")
         self.console.print("─" * 80)
 
-        loop = asyncio.get_event_loop()
+        # loop = asyncio.get_event_loop()
         self._chat_loop()
 
     def _chat_loop(self):
