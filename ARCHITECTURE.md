@@ -68,6 +68,49 @@ for runtime observability, the orchestrator now publishes two compact surfaces a
 
 ---
 
+## wave/classic runtime behavior
+
+hermit supports two runtime architectures that change how model state and orchestration are managed:
+
+### classic mode (`/mode classic`)
+
+- stable default behavior
+- follows the tiered loading/unloading path between joint stages
+- prioritizes predictable memory/compute usage over keeping everything hot
+
+classic mode is useful when you want conservative behavior and reproducible performance across long sessions.
+
+### wave mode (`/mode wave`)
+
+- keeps the runtime path hotter and relies more on prompt/state-level resets between passes
+- enables teleport-style shell/file orchestration paths in supported flows
+- is designed for iterative, chained work where preserving compact task state between turns matters
+
+in short: classic emphasizes strict tier transitions; wave emphasizes continuity of execution with controlled resets.
+
+---
+
+## memory model: contracted cognition + residue
+
+hermit does not rely on hidden chain-of-thought persistence. instead, it keeps an explicit compact state contract that can survive runtime resets without pretending full continuity.
+
+key pieces:
+
+- **runtime checkpoint**: a compact contract envelope (objective, frontier, risk, next step, artifacts)
+- **residue trail**: step-level status/metrics from orchestration passes
+- **artifact log**: typed retrieval/tool excursion records that can be replayed or inspected
+- **status snapshot**: latest mode + contract health surface for UI/diagnostics
+
+this gives a practical middle ground:
+
+- enough continuity to continue multi-step tasks after resets
+- bounded memory footprint
+- auditable behavior (what was carried forward vs discarded)
+
+this is the mechanism behind the "building blocks" effect in wave-style operation: not full transcript replay, but structured state carry-forward.
+
+---
+
 ## grounded answer contract (model-agnostic)
 
 recent updates add a strict grounding contract above the final generation step:
