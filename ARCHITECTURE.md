@@ -1,171 +1,217 @@
-# how hermit works (for real)
+# how hermit works
 
-this is the actual architecture, written like a human, not a press release.
-if you just want to chat with hermit, skip this.
-if you want to understand why it behaves the way it does (or why it refuses sometimes), read on.
+this document explains the architecture behind hermit's retrieval system. if you just want to use the chatbot, you don't need to read this. but if you're curious about why it's designed the way it is, or you want to contribute, this should help.
 
 ---
 
-## the core problem
+## the problem with local llms
 
-local models are great, but on factual questions they do two things:
+when you run a language model locally and ask it a factual question, it has two options: either it happens to know the answer from its training data, or it makes something up. there's no way for it to say "i don't know" because it doesn't actually understand that it's guessing. this is the hallucination problem.
 
-1. know it
-2. bluff it
+the standard solution is retrieval augmented generation, or rag. you search for relevant documents, stuff them into the context window, and hope the model pays attention. the problem is that naive rag systems often retrieve garbage. vector similarity doesn't understand that "python language creator" should find an article about guido van rossum. and even when they find the right article, the model might still ignore it and hallucinate anyway.
 
-classic rag helps, but naive rag also fails a lot:
-- retrieves junk
-- misses obvious entity chains ("creator of python" -> guido)
-- model ignores retrieval and answers from vibes anyway
-
-so hermit is built as a staged system with checks between stages.
-not one giant model call.
+hermit takes a different approach. instead of trusting a single retrieval step, it chains multiple model calls together, each one checking the work of the previous step. i call these "joints" because they're like joints in a pipeline, each one adding a bit of intelligence to the flow.
 
 ---
 
-## runtime modes: `/mode classic` vs `/mode wave`
+## the multi-joint pipeline
 
-this part matters.
+when you ask hermit a question, here's what actually happens:
 
-two runtime modes exist in this build:
+### step 1: entity extraction
 
-### classic mode
-- stable default
-- tiered loading/unloading between joints and final synthesis
-- conservative behavior, less runtime experimentation
+the first model call looks at your question and extracts the entities you're asking about. if you ask "what university did the creator of python attend?", it identifies that you're asking about python, specifically python the programming language (not the snake), and that there's an indirect reference to whoever created it.
 
-### wave mode
-- keeps runtime tiers hotter
-- routes through wave/teleport-style orchestration paths
-- better for iterative/tool-like workflows and residue tracking
+this step also assigns an ambiguity score. if your question uses vague terms or indirect references like "the inventor of x" or "the capital of y", the system knows it might need to do a second hop of retrieval later.
 
-both modes are supported now.
+### step 2: title generation
 
----
+here's where hermit diverges from traditional rag. instead of doing a vector search, it asks the llm to predict which wikipedia articles are likely to contain the answer. the model's world knowledge is actually pretty good at this because it knows that asking about the creator of python should look at "Python (programming language)" and "Guido van Rossum".
 
-## pipeline overview (the joints)
+this bypasses the whole embedding/vector store infrastructure. no faiss index to build, no sentence transformers to load, just direct lookups against the zim file. it sounds crazy but it works better than vector search for most factual queries.
 
-when you ask a factual query, rough flow is:
+### step 3: article scoring
 
-1. **entity extraction**
-   - pulls entities + query intent + ambiguity
-2. **title generation / lookup strategy**
-   - predicts likely article targets
-3. **scoring/filtering**
-   - keeps likely relevant sources, drops weak ones
-4. **fact refinement**
-   - extracts candidate facts instead of dumping full docs
-5. **multi-hop resolve (when needed)**
-   - indirect references become concrete entities
-6. **final synthesis**
-   - answer built from evidence path
+the predicted titles are looked up in the zim files, and another model call scores each article for relevance. this catches cases where the title prediction was reasonable but the article doesn't actually answer the question. articles that score below the threshold are discarded.
 
-this is why hermit can run smaller local models and still stay useful.
+### step 4: fact refinement
+
+for the surviving articles, another model call extracts the specific facts that are relevant to the question. instead of stuffing the entire wikipedia article into the context, hermit pulls out just the sentences that matter. this keeps the context focused and prevents the final model from getting distracted by irrelevant paragraphs.
+
+### step 5: multi-hop resolution (when needed)
+
+if the entity extraction step detected an indirect reference, hermit can do a second round of retrieval. for the python creator example, after finding that guido van rossum created python, it would search for his article to find where he went to university. this lets hermit answer questions that require chaining multiple facts together.
+
+### step 6: final generation
+
+all the extracted facts get assembled into a context message, and the main model generates the final answer. because the context has been filtered and verified through multiple stages, the model is much more likely to give an accurate response.
 
 ---
 
-## orchestration blackboard (signals + gear shifting)
+## dynamic orchestration
 
-hermit tracks state while running, not just at the end.
+the latest version of hermit adds a "blackboard" architecture that tracks the state of retrieval across all these steps. instead of rigidly executing the same pipeline for every query, the system can adapt based on what it finds.
 
-main signals:
-- **ambiguity score**
-- **source score**
-- **coverage ratio**
+there are three main signals the orchestrator tracks:
 
-gear shifting logic can inject extra steps:
-- low source score -> expand/search again
-- low coverage -> targeted search
-- high ambiguity -> resolve/multi-hop
-- high confidence + coverage -> early exit
+**ambiguity score**: how unclear is the query? high ambiguity triggers multi-hop resolution.
 
-step dispatch is table-driven (not giant if/else spaghetti), so behavior is easier to evolve safely.
+**source score**: how relevant are the retrieved articles? low scores trigger query expansion, where the system tries different phrasings.
 
----
+**coverage ratio**: how many of the extracted entities are covered by the retrieved articles? if important entities are missing, the system does targeted searches to fill the gaps.
 
-## teleport-style memory / reset residue (yes, this is in the build)
+this creates a kind of feedback loop where the system can recognize when its initial retrieval attempt failed and try again with different strategies.
 
-yes, your technique is still here.
+an important implementation detail: orchestration step dispatch is table-driven (step name → handler) rather than a long if/elif chain. this keeps behavior stable while making it easier to add, reorder, or selectively disable steps in future passes without touching controller flow logic.
 
-hermit uses a contracted-cognition checkpoint + residue/artifact trail so resets don't wipe everything meaningful.
-
-conceptually:
-- full scratchpad is **not** preserved
-- compact, typed runtime state **is** preserved
-- objective/frontier/risk/residue/artifacts can be carried forward
-
-that means after resets, it can rebuild task continuity from structured blocks instead of pretending it has perfect memory.
-
-key surfaces exposed by runtime:
-- `last_orchestration_status`
-- `last_orchestration_snapshot`
-- runtime checkpoint (contract envelope + residue/artifacts)
-
-that is the "building blocks" behavior you described.
+for runtime observability, the orchestrator now publishes two compact surfaces after each retrieval cycle: `last_orchestration_status` (mode, residue/artifact summary, remaining steps + contract health) and `last_orchestration_snapshot` (explicit `contract` envelope + base-mind + objective/frontier/risk + recent residue/events/artifacts). compatibility tests lock these contracts so future routing changes don't silently break downstream diagnostics.
 
 ---
 
 ## grounded answer contract (model-agnostic)
 
-recent change: evidence enforcement is architecture-level.
+recent updates add a strict grounding contract above the final generation step:
 
-what that means:
-- retrieval sources get artifact ids (ex: `A1:Title#chunk`)
-- grounded/artifact-only requests require factual claims to be tied to artifact evidence
-- if required evidence is missing, hermit does **not** guess
-- fallback can be human-sounding instead of robotic
+- retrieval results are tagged with stable artifact ids (for example `A1:Title#chunk`).
+- grounded-answer requests require factual claims to be traceable to those artifact ids.
+- if required facts are missing citations, hermit returns an honest fallback instead of guessing.
 
-important: this applies across model sizes.
-0.5b, 3b, bigger model — same contract.
+this is intentionally architecture-level, not model-level. a 0.5b, 3b, or larger model all face the same contract.
 
-so this is not "teaching the test". it's policy in the runtime path.
+in practice this gives two properties:
 
----
-
-## retrieval hardening for indirect + biography slots
-
-for indirect prompts (like "creator of x"), hermit now does more than a single follow-up:
-
-- resolve indirect reference to concrete entity
-- direct title probes on resolved forms first
-- slot-oriented follow-up queries (education/employment/role etc.)
-- resolver-aware coverage normalization (so placeholders don't poison coverage)
-
-goal: fewer false fails when evidence actually exists in corpus.
+1. **truthfulness under pressure**: when evidence is missing, hermit fails safely.
+2. **organic UX**: user-facing fallback text can still sound natural (not robotic), while internal policy stays strict.
 
 ---
 
-## cloud path in public build
+## retrieval hardening for indirect/biographical slots
 
-public cloud path is now simple:
+for indirect prompts like "creator of x", orchestration now does more than one naive follow-up:
 
-- `/cloud` = configure OpenRouter URL/key/model
-- `/turbo` = switch to API mode with saved settings
+- resolver step finds the concrete entity (for example, `creator of Python -> Guido van Rossum`).
+- direct title probes run on resolved entity forms before broad expansion.
+- slot-oriented follow-ups are injected for biography-style needs (education, role, employment, etc.).
+- coverage normalization treats resolved placeholders correctly, reducing false "missing entity" loops.
 
-no Codex OAuth menu in public flow.
-
-settings are persisted locally in hermit public settings with restrictive file perms.
-
----
-
-## model tiers
-
-different tasks use different model sizes.
-small models do extraction/scoring/filtering fast.
-larger local model handles richer synthesis.
-
-this is intentional: speed + reliability > brute force everything with one huge model.
+this improves the odds that citation-required answers can pass with evidence, instead of failing due to weak follow-up retrieval.
 
 ---
 
-## why this architecture exists
+## public cloud mode path
 
-the point is not to look smart.
-the point is to be reliable on real hardware.
+public builds now treat cloud mode as API-key configuration rather than oauth login flow:
 
-if evidence is there, cite it.
-if evidence is missing, say so.
-if query is messy, adapt the retrieval plan.
-if runtime resets, keep compact residue and continue.
+- `/cloud` configures OpenRouter URL/key/model.
+- `/turbo` activates API mode using those saved settings.
+- key persistence uses local settings storage with restrictive permissions.
 
-that’s hermit.
+this keeps cloud activation simple and portable while preserving local-first architecture defaults.
+
+---
+
+## the model tier system
+
+hermit uses different sized models for different tasks. the entity extraction, scoring, and filtering joints use a fast 1.5b parameter model because they're doing focused, specific tasks. the final generation and any reasoning heavy steps use a larger 8b model for better quality.
+
+this is a tradeoff between speed and accuracy. the small model is fast enough that you can run five joints in the time it would take to run one call with a large model. but you wouldn't want to use the small model for final generation because its responses would be lower quality.
+
+---
+
+## the architecture diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           USER QUERY                                     │
+│                  "What university did the creator                        │
+│                       of Python attend?"                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    HERMIT CONTEXT (Blackboard)                          │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐          │
+│  │ ambiguity: 0.7  │  │ source_score: 0 │  │ coverage: 0.0   │          │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘          │
+│  ┌─────────────────────────────────────────────────────────────┐        │
+│  │ plan: [extract, resolve, search, score, verify]             │        │
+│  └─────────────────────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────────────────────┘
+                                   │
+         ┌─────────────────────────┼─────────────────────────┐
+         ▼                         ▼                         ▼
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│   JOINT 1       │      │   JOINT 2       │      │   JOINT 3       │
+│   Entity        │      │   Article       │      │   Chunk         │
+│   Extraction    │      │   Scoring       │      │   Filtering     │
+│   (1.5B model)  │      │   (1.5B model)  │      │   (1.5B model)  │
+└─────────────────┘      └─────────────────┘      └─────────────────┘
+         │                                                │
+         └──────────────────────┬─────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           JOINT 0.5                                      │
+│                      Multi-Hop Resolution                                │
+│                         (8B model)                                       │
+│   "creator of Python" → retrieves Python article → extracts              │
+│   "Guido van Rossum" → triggers second search                            │
+└─────────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           ZIM FILES                                      │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐         │
+│  │ Wikipedia  │  │StackOverflow│  │   Law SE   │  │   Medical  │         │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────┘         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      FINAL GENERATION                                    │
+│                        (any GGUF model)                                       │
+│                                                                          │
+│  Context: "Guido van Rossum studied at the University of Amsterdam..."  │
+│  Response: "Guido van Rossum, the creator of Python, attended the       │
+│             University of Amsterdam."                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## signal-based gear shifting
+
+the orchestrator continuously evaluates three signals and can modify the execution plan mid-flight:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        GEAR SHIFT LOGIC                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  IF source_score < 6.0:                                                  │
+│      → inject "expand_query" step                                        │
+│      → try different phrasings to find better articles                   │
+│                                                                          │
+│  IF coverage_ratio < 1.0:                                                │
+│      → inject "targeted_search" step                                     │
+│      → find articles for missing entities                                │
+│                                                                          │
+│  IF ambiguity_score > 0.7:                                               │
+│      → inject "resolve" step                                             │
+│      → handle indirect references with multi-hop                         │
+│                                                                          │
+│  IF source_score > 8.0 AND coverage_ratio == 1.0:                        │
+│      → early exit                                                        │
+│      → skip remaining steps, we have what we need                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+this makes the system adaptive. simple queries with clear entities get answered quickly. complex queries with indirect references or poor initial retrieval get additional processing passes.
+
+---
+
+## why not just use a bigger model?
+
+you could throw a 70b model at this problem and it would probably work better on raw factual recall. but that misses the point. hermit is designed to run on consumer hardware, offline, with no cloud dependencies. the multi-joint architecture lets a 3b model match or exceed the factual accuracy of much larger models by grounding its answers in verified content.
+
+the goal isn't to build the smartest possible ai. it's to build a reliable research tool that works on your laptop without an internet connection.
