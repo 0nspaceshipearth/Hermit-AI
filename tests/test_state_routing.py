@@ -7,6 +7,7 @@ from chatbot.state import (
     detect_gap_routing,
     route_plan_for_goal,
 )
+from chatbot.intent import classify_query_complexity
 
 
 class TestStateRouting(unittest.TestCase):
@@ -19,6 +20,23 @@ class TestStateRouting(unittest.TestCase):
         route = route_plan_for_goal("What university did the creator of Python attend?", "complex")
         self.assertEqual(route.goal, "multi_hop_resolution")
         self.assertIn("resolve", route.plan)
+
+    def test_moderate_route_includes_resolve(self):
+        route = route_plan_for_goal("Python interpreter release notes", "moderate")
+        self.assertEqual(route.goal, "moderate_resolution")
+        self.assertIn("resolve", route.plan)
+
+    def test_indirect_ref_query_classified_as_complex(self):
+        cx = classify_query_complexity("What university did the creator of Python attend?")
+        self.assertEqual(cx.level, "complex")
+        self.assertFalse(cx.skip_multi_hop)
+
+    def test_indirect_ref_end_to_end_routing(self):
+        q = "What university did the creator of Python attend?"
+        cx = classify_query_complexity(q)
+        route = route_plan_for_goal(q, cx.level)
+        self.assertIn("resolve", route.plan)
+        self.assertLess(route.plan.index("resolve"), route.plan.index("score"))
 
     def test_context_residue_tracking(self):
         ctx = HermitContext(original_query="test")

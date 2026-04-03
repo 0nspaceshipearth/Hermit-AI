@@ -119,16 +119,27 @@ class OrchestrationModule:
 
                 # Early Termination Check 1: Exact title match (score 11.0 from direct lookup)
                 # If first result is an exact match, skip additional processing
+                complexity_level = getattr(getattr(ctx, "complexity", None), "level", "simple")
+                ambiguity = float(ctx.signals.get("ambiguity_score", 0.0))
+                has_indirect_ref = bool(ctx.iteration_results.get("indirect_reference"))
                 if ctx.retrieved_data:
                     first_score = ctx.retrieved_data[0].get('score', 0)
-                    if first_score >= 10.0 and len(ctx.retrieved_data) >= 1:
+                    if (
+                        complexity_level == "simple"
+                        and not has_indirect_ref
+                        and ambiguity < config.MULTI_HOP_AMBIGUITY_THRESHOLD
+                        and first_score >= 10.0
+                        and len(ctx.retrieved_data) >= 1
+                    ):
                         ctx.log(f"✅ Early termination: Exact title match (score={first_score:.1f})")
                         break
 
                 # Early Termination Check 2: High quality results with good coverage
                 if (ctx.signals.get("highest_source_score", 0) >= config.HIGH_QUALITY_THRESHOLD
                     and ctx.signals.get("coverage_ratio", 0) >= config.MIN_COVERAGE_THRESHOLD
-                    and len(ctx.retrieved_data) >= config.MIN_RESULTS_FOR_EARLY_EXIT):
+                    and len(ctx.retrieved_data) >= config.MIN_RESULTS_FOR_EARLY_EXIT
+                    and ambiguity < config.MULTI_HOP_AMBIGUITY_THRESHOLD
+                    and not has_indirect_ref):
                     ctx.log(f"✅ Early termination: High quality results found ({ctx.signals['highest_source_score']:.1f} score, {ctx.signals['coverage_ratio']:.0%} coverage)")
                     break
 
@@ -215,6 +226,26 @@ class OrchestrationModule:
 
         return added
 
+    def _has_indirect_reference(self, query: str, entity_info: Optional[Dict[str, Any]]) -> bool:
+        """Detect relationship-style references that usually require multi-hop lookup."""
+        q = (query or "").lower()
+        patterns = (
+            r"\b(creator|inventor|founder|author|developer|designer|maker)\s+of\b",
+            r"\b(capital|leader|president|ceo|director)\s+of\b",
+            r"\b(parent|spouse|wife|husband|child|daughter|son)\s+of\b",
+        )
+        if any(re.search(p, q) for p in patterns):
+            return True
+
+        if not isinstance(entity_info, dict):
+            return False
+
+        for entity in entity_info.get("entities", []) or []:
+            name = str(entity.get("name", "")).lower()
+            if any(re.search(p, name) for p in patterns):
+                return True
+        return False
+
     def _orchestrate_extract(self, ctx) -> None:
         """Extract entities from query andupdate ambiguity score."""
         if not self.use_joints or not hasattr(self, 'entity_joint'):
@@ -229,15 +260,24 @@ class OrchestrationModule:
             # Calculate ambiguity score
             is_comparison = entity_info.get('is_comparison', False)
             num_entities = len(entity_info.get('entities', []))
-            
-            if is_comparison:
+
+            # Relationship-style prompts (e.g., "creator of X") need multi-hop.
+            indirect_ref = self._has_indirect_reference(ctx.original_query, entity_info)
+            ctx.iteration_results["indirect_reference"] = indirect_ref
+
+            if indirect_ref:
+                ctx.signals["ambiguity_score"] = 0.75
+            elif is_comparison:
                 ctx.signals["ambiguity_score"] = 0.8  # Comparisons are complex
             elif num_entities > 3:
                 ctx.signals["ambiguity_score"] = 0.6  # Multiple entities = moderate complexity
             else:
                 ctx.signals["ambiguity_score"] = 0.2  # Simple query
-                
-            ctx.log(f"  Extracted {num_entities} entities, ambiguity={ctx.signals['ambiguity_score']:.2f}")
+
+            ctx.log(
+                f"  Extracted {num_entities} entities, ambiguity={ctx.signals['ambiguity_score']:.2f} "
+                f"(indirect_ref={indirect_ref})"
+            )
             
         except Exception as e:
             ctx.log(f"  ⚠ Entity extraction failed: {e}")
@@ -326,11 +366,25 @@ class OrchestrationModule:
             ctx.log("⚠ Multi-hop resolver not available")
             return
 
-        if not ctx.extracted_entities or not ctx.retrieved_data:
-            ctx.log("  No entities or data to resolve")
+        if not ctx.extracted_entities:
+            ctx.log("  No entities to resolve")
+            return
+
+        if not ctx.retrieved_data:
+            if (
+                not ctx.iteration_results.get("resolve_deferred_once")
+                and ctx.signals.get("step_counter", 0) < 8
+            ):
+                ctx.iteration_results["resolve_deferred_once"] = True
+                if "resolve" not in ctx.current_plan:
+                    ctx.add_step("resolve", priority="normal")
+                ctx.log("  No retrieved data yet; deferring multi-hop resolution")
+            else:
+                ctx.log("  No entities or data to resolve")
             return
             
         try:
+            ctx.iteration_results["multi_hop_attempted"] = True
             entities = ctx.extracted_entities.get('entities', [])
             resolution = self.resolver_joint.process(
                 ctx.original_query,
@@ -467,14 +521,17 @@ class OrchestrationModule:
                 highest_score = 0.0
                 for res in ctx.retrieved_data:
                     t = res.get('metadata', {}).get('title', '')
-                    if t in score_map:
-                        new_score = score_map[t]
-                        res['score'] = new_score
-                        if new_score > highest_score:
-                            highest_score = new_score
-                            
+                    current_score = float(res.get('score', 0.0) or 0.0)
+                    new_score = float(score_map.get(t, current_score))
+                    res['score'] = new_score
+                    if new_score > highest_score:
+                        highest_score = new_score
+
+                # Keep frontier ordering aligned with scorer output.
+                ctx.retrieved_data.sort(key=lambda r: float(r.get('score', 0.0) or 0.0), reverse=True)
+                top_titles = [r.get('metadata', {}).get('title', '') for r in ctx.retrieved_data[:3]]
                 ctx.signals["highest_source_score"] = highest_score
-                ctx.log(f"  Highest score: {highest_score:.1f}/10")
+                ctx.log(f"  Highest score: {highest_score:.1f}/10 | top ranked: {top_titles}")
             else:
                 ctx.signals["highest_source_score"] = 0.0
                 
@@ -668,15 +725,17 @@ class OrchestrationModule:
         Injects corrective steps into the plan when thresholds are not met.
         """
         # Gear 1.5: High Ambiguity → Multi-Hop Resolution
-        # Trigger if ambiguity is high and we haven't tried resolving yet
+        # Trigger if ambiguity is high and we haven't tried resolving yet.
+        # Use high priority so resolve runs *before* score/verify (not appended after).
         if (config.ENABLE_MULTI_HOP_RESOLUTION
             and ctx.signals.get("ambiguity_score", 0) >= config.MULTI_HOP_AMBIGUITY_THRESHOLD
             and "resolve" not in ctx.current_plan
-            and not ctx.iteration_results.get('multi_hop_attempted')
-            and ctx.signals["step_counter"] < 4):
+            and not ctx.iteration_results.get('multi_hop_requested')
+            and ctx.signals["step_counter"] < 3):
+            # Prepend so resolver runs before score/verify on the enriched candidate set.
             ctx.add_step("resolve", priority="high")
-            ctx.iteration_results['multi_hop_attempted'] = True
-            ctx.log(f"  🔄 GEAR 1.5: High ambiguity ({ctx.signals['ambiguity_score']:.2f}), adding multi-hop resolution")
+            ctx.iteration_results['multi_hop_requested'] = True
+            ctx.log(f"  🔄 GEAR 1.5: High ambiguity ({ctx.signals['ambiguity_score']:.2f}), scheduling multi-hop resolution (high-priority)")
 
         # Gear 2: Low source scores → expand query
         if (ctx.signals.get("highest_source_score", 0) < config.MIN_SOURCE_SCORE_THRESHOLD 

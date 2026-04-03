@@ -45,6 +45,15 @@ class QueryComplexity:
     max_steps: int        # Reduced orchestration steps for simple queries
 
 
+# Indirect-reference patterns that require multi-hop resolution.
+# Matched against the lowercased query before other heuristics.
+_INDIRECT_REF_PATTERNS = (
+    r"\b(creator|inventor|founder|author|developer|designer|maker)\s+of\b",
+    r"\b(capital|leader|president|ceo|director)\s+of\b",
+    r"\b(parent|spouse|wife|husband|child|daughter|son)\s+of\b",
+)
+
+
 def classify_query_complexity(query: str) -> QueryComplexity:
     """
     Heuristic classifier to determine query complexity.
@@ -55,6 +64,18 @@ def classify_query_complexity(query: str) -> QueryComplexity:
     """
     debug_print(f"Classifying complexity for: '{query}'")
     q_lower = query.lower().strip()
+
+    # COMPLEX: Indirect-reference patterns (creator/founder/spouse of X, etc.)
+    # These always require multi-hop resolution; check before entity/word counts.
+    for pattern in _INDIRECT_REF_PATTERNS:
+        if re.search(pattern, q_lower):
+            debug_print(f"COMPLEX query (indirect reference pattern: {pattern!r})")
+            return QueryComplexity(
+                level="complex",
+                skip_multi_hop=False,
+                skip_coverage=False,
+                max_steps=10,
+            )
 
     # Count entities (capitalized words, quoted strings)
     entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query)

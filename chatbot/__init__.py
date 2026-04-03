@@ -1,4 +1,3 @@
-
 # Hermit - Offline AI Chatbot for Wikipedia & ZIM Files
 # Copyright (C) 2026 Hermit-AI, Inc.
 #
@@ -17,15 +16,22 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-"""Chatbot GUI application."""
+"""Chatbot package entry points and shared exports."""
 
 import sys
-from chatbot.gui import ChatbotGUI
-from chatbot.models import Message, ModelPlatform
+
 from chatbot.config import DEFAULT_MODEL
+from chatbot.models import Message, ModelPlatform
 from chatbot.state import HermitContext
 
-__all__ = ['ChatbotGUI', 'Message', 'ModelPlatform', 'HermitContext']
+__all__ = ["ChatbotGUI", "Message", "ModelPlatform", "HermitContext"]
+
+
+def __getattr__(name):
+    if name == "ChatbotGUI":
+        from chatbot.gui import ChatbotGUI
+        return ChatbotGUI
+    raise AttributeError(f"module 'chatbot' has no attribute {name!r}")
 
 
 def main():
@@ -33,8 +39,10 @@ def main():
     model = DEFAULT_MODEL
     if len(sys.argv) > 1:
         model = sys.argv[1]
-    
+
     try:
+        from chatbot.gui import ChatbotGUI
+
         app = ChatbotGUI(model)
         app.run()
     except KeyboardInterrupt:

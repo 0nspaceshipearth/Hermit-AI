@@ -460,6 +460,33 @@ def _llama_gpu_offload_enabled() -> bool:
         return False
 
 
+def _format_gpu_inventory(gpus: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for gpu in gpus:
+        label = f"GPU{gpu.get('index', '?')} {gpu.get('name', 'Unknown GPU')}"
+        free_gb = gpu.get("memory_free_gb")
+        total_gb = gpu.get("memory_total_gb")
+        if isinstance(free_gb, (int, float)) and isinstance(total_gb, (int, float)):
+            label = f"{label} {free_gb:.1f}/{total_gb:.1f}GB free"
+        parts.append(label)
+    return ", ".join(parts)
+
+
+def _build_gpu_backend_warning(
+    gpus: List[Dict[str, Any]],
+    gpu_offload_enabled: bool,
+    requested_n_gpu_layers: int,
+) -> Optional[str]:
+    if requested_n_gpu_layers == 0 or not gpus or gpu_offload_enabled:
+        return None
+
+    inventory = _format_gpu_inventory(gpus)
+    return (
+        f"{inventory} detected, but the installed llama-cpp-python backend reports no GPU offload support. "
+        "Hermit will run in CPU mode until llama-cpp-python is reinstalled with CUDA support. Re-run ./setup.sh."
+    )
+
+
 def _recommended_contexts(requested_n_ctx: int, file_size_gb: float, trained_ctx: int) -> List[int]:
     contexts = [requested_n_ctx]
     if file_size_gb >= 18.0:
@@ -1045,7 +1072,15 @@ class ModelManager:
                 cls.close_all()
 
             gpus = _detect_gpu_inventory()
-            gpu_enabled = _llama_gpu_offload_enabled() and bool(gpus)
+            gpu_offload_enabled = _llama_gpu_offload_enabled()
+            gpu_enabled = gpu_offload_enabled and bool(gpus)
+            gpu_backend_warning = _build_gpu_backend_warning(
+                gpus=gpus,
+                gpu_offload_enabled=gpu_offload_enabled,
+                requested_n_gpu_layers=n_gpu_layers,
+            )
+            if gpu_backend_warning:
+                print(f"⚠️ {gpu_backend_warning}")
             load_candidates = _build_load_candidates(
                 file_size_gb=file_size_gb,
                 total_layers=total_layers,
@@ -1058,7 +1093,7 @@ class ModelManager:
             print(f"Loading model: {repo_id}...")
             print(
                 f"DEBUG: arch={architecture}, layers={total_layers}, trained_ctx={trained_ctx or 'unknown'}, "
-                f"file_size={file_size_gb:.2f}GB, gpu_backend={gpu_enabled}, gpus={len(gpus)}"
+                f"file_size={file_size_gb:.2f}GB, gpu_backend_ready={gpu_offload_enabled}, gpu_enabled={gpu_enabled}, gpus={len(gpus)}"
             )
             _notify_progress("loading", -1, f"Loading {model_name}...")
 

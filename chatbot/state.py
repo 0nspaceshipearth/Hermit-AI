@@ -548,6 +548,15 @@ def route_plan_for_goal(query: str, complexity_level: str = "simple") -> GoalRou
             confidence=0.70,
         )
 
+    if complexity_level == "moderate":
+        # Moderate: includes resolve so indirect-reference / multi-entity queries
+        # get a resolution pass between retrieval and scoring.
+        return GoalRoute(
+            goal="moderate_resolution",
+            plan=["extract", "search", "resolve", "score", "verify"],
+            confidence=0.65,
+        )
+
     return GoalRoute(
         goal="factual_lookup",
         plan=["extract", "search", "score", "verify"],

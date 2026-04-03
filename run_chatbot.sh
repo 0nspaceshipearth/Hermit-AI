@@ -25,6 +25,53 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+append_ld_library_path() {
+    local lib_dir="$1"
+    if [ ! -d "$lib_dir" ]; then
+        return 0
+    fi
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$lib_dir:"*) ;;
+        *) export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
+}
+
+export_venv_cuda_libs() {
+    local python_cmd="$1"
+    if [ ! -x "$python_cmd" ]; then
+        return 0
+    fi
+
+    local site_packages
+    site_packages="$({
+        "$python_cmd" - <<'PY'
+import site
+
+candidates = []
+getsitepackages = getattr(site, "getsitepackages", None)
+if callable(getsitepackages):
+    candidates.extend(getsitepackages())
+usersite = getattr(site, "getusersitepackages", lambda: None)()
+if usersite:
+    candidates.append(usersite)
+
+seen = set()
+for path in candidates:
+    if path and path.endswith("site-packages") and path not in seen:
+        seen.add(path)
+        print(path)
+        break
+PY
+    } 2>/dev/null)"
+
+    if [ -z "$site_packages" ] || [ ! -d "$site_packages/nvidia" ]; then
+        return 0
+    fi
+
+    for lib_dir in "$site_packages"/nvidia/*/lib "$site_packages"/nvidia/*/lib64; do
+        append_ld_library_path "$lib_dir"
+    done
+}
 
 # Ollama check removed (Local Inference Mode)
 
@@ -34,6 +81,7 @@ cd "$SCRIPT_DIR"
 if [ -d "$SCRIPT_DIR/venv" ]; then
     source "$SCRIPT_DIR/venv/bin/activate"
     PYTHON_CMD="$SCRIPT_DIR/venv/bin/python3"
+    export_venv_cuda_libs "$PYTHON_CMD"
 else
     PYTHON_CMD="python3"
 fi

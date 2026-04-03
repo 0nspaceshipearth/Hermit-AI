@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from chatbot.model_manager import (
+    _build_gpu_backend_warning,
     _build_load_candidates,
     _recommend_gpu_layers,
     _recommended_contexts,
@@ -44,6 +45,27 @@ class TestModelManagerHeuristics(unittest.TestCase):
         self.assertNotEqual(candidates[0]["n_gpu_layers"], 0)
         self.assertEqual(candidates[-1]["n_gpu_layers"], 0)
         self.assertIsNotNone(candidates[0]["tensor_split"])
+
+    def test_gpu_backend_warning_surfaces_silent_cpu_fallback(self):
+        warning = _build_gpu_backend_warning(
+            gpus=self.dual_3060,
+            gpu_offload_enabled=False,
+            requested_n_gpu_layers=-1,
+        )
+
+        self.assertIsNotNone(warning)
+        self.assertIn("RTX 3060", warning)
+        self.assertIn("CPU mode", warning)
+        self.assertIn("Re-run ./setup.sh", warning)
+
+    def test_gpu_backend_warning_respects_explicit_cpu_requests(self):
+        warning = _build_gpu_backend_warning(
+            gpus=self.dual_3060,
+            gpu_offload_enabled=False,
+            requested_n_gpu_layers=0,
+        )
+
+        self.assertIsNone(warning)
 
 
 if __name__ == "__main__":
